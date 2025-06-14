@@ -1,0 +1,32 @@
+# MongoDB Operator Helm Values
+operator:
+  image:
+    repository: percona/percona-server-mongodb-operator
+    tag: latest
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "200m"
+
+# Default MongoDB cluster configuration
+mongodb:
+  image:
+    repository: percona/percona-server-mongodb
+    tag: latest
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "200m"
+  size: 1
+  storage:
+    size: 1Gi
+  users:
+    - name: app_user
+      password: app_password
+      databases: [app_db] 

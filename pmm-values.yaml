@@ -1,0 +1,54 @@
+# PMM Server Configuration
+server:
+  # Enable persistent storage
+  persistence:
+    enabled: true
+    size: 10Gi
+  
+  # Configure resource limits
+  resources:
+    requests:
+      memory: "1Gi"
+      cpu: "500m"
+    limits:
+      memory: "2Gi"
+      cpu: "1000m"
+
+  # Configure service
+  service:
+    type: ClusterIP
+    port: 80
+
+# PMM Client Configuration
+client:
+  # Enable automatic client registration
+  autoRegistration: true
+
+# Configure monitoring components
+monitoring:
+  # Enable Prometheus
+  prometheus:
+    enabled: true
+    retention: 15d
+  
+  # Enable Grafana
+  grafana:
+    enabled: true
+    adminPassword: "admin"  # Change this in production!
+  
+  # Enable VictoriaMetrics
+  victoriametrics:
+    enabled: true
+    retention: 15d
+
+# Configure backup storage
+backup:
+  enabled: true
+  storage:
+    size: 5Gi
+
+# Configure alerting
+alerting:
+  enabled: true
+  alertmanager:
+    enabled: true 

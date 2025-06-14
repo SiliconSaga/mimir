@@ -1,0 +1,62 @@
+apiVersion: psmdb.percona.com/v1
+kind: PerconaServerMongoDB
+metadata:
+  name: my-mongo-cluster
+  namespace: psmdb
+spec:
+  allowUnsafeConfigurations: true
+  crVersion: 1.15.0
+  image: percona/percona-server-mongodb:6.0.24-19
+  imagePullPolicy: Always
+  updateStrategy: SmartUpdate
+  upgradeOptions:
+    versionServiceEndpoint: https://check.percona.com
+    apply: disabled
+    schedule: "0 2 * * *"
+    setFCV: false
+  secrets:
+    users: my-mongo-cluster-secrets
+    encryptionKey: my-mongo-cluster-mongodb-encryption-key
+  pmm:
+    enabled: true
+    image: percona/pmm-client:2.39.0
+    serverHost: monitoring-service.pmm.svc.cluster.local
+  replsets:
+    - name: rs0
+      size: 1
+      affinity:
+        antiAffinityTopologyKey: kubernetes.io/hostname
+      expose:
+        enabled: false
+        exposeType: ClusterIP
+      podDisruptionBudget:
+        maxUnavailable: 1
+      resources:
+        limits:
+          cpu: "300m"
+          memory: "0.5G"
+        requests:
+          cpu: "300m"
+          memory: "0.5G"
+      volumeSpec:
+        persistentVolumeClaim:
+          resources:
+            requests:
+              storage: 1Gi
+  sharding:
+    enabled: false
+  backup:
+    enabled: true
+    image: percona/percona-backup-mongodb:2.3.0
+    storages:
+      local-storage:
+        type: filesystem
+        filesystem:
+          path: /backup
+    tasks:
+      - name: daily-backup
+        schedule: "0 0 * * *"
+        enabled: true
+        storageName: local-storage
+        keep: 7
+        type: logical

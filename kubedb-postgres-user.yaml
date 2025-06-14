@@ -1,0 +1,10 @@
+apiVersion: kubedb.com/v1alpha2
+kind: PostgresUser
+metadata:
+  name: my_user
+spec:
+  databaseRef:
+    name: my_database
+  secretName: my-user-auth
+  privileges:
+    - ALL 

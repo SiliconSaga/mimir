@@ -1,0 +1,11 @@
+apiVersion: kubedb.com/v1alpha2
+kind: MongoDBUser
+metadata:
+  name: my_user
+spec:
+  databaseRef:
+    name: my_database
+  secretName: my-mongo-user-auth
+  roles:
+    - role: readWrite
+      db: my_database 
