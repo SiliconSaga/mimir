@@ -1,0 +1,103 @@
+apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+metadata:
+  name: xpostgresql-percona
+  labels:
+    provider: percona
+    service: postgresql
+spec:
+  mode: Pipeline
+  writeConnectionSecretsToNamespace: crossplane-system
+  compositeTypeRef:
+    apiVersion: database.example.org/v1alpha1
+    kind: XPostgreSQL
+  pipeline:
+  - step: create-percona-postgresql
+    functionRef:
+      name: function-go-templating
+    input:
+      apiVersion: gotemplating.fn.crossplane.io/v1beta1
+      kind: GoTemplate
+      source: Inline
+      inline:
+        template: |
+          apiVersion: pgv2.percona.com/v2
+          kind: PerconaPGCluster
+          metadata:
+            name: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-name" | default .observed.composite.resource.metadata.name }}
+            namespace: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-namespace" | default "default" }}
+            annotations:
+              crossplane.io/external-name: {{ .observed.composite.resource.metadata.name }}
+              gotemplating.fn.crossplane.io/composition-resource-name: percona-postgresql
+          spec:
+            crVersion: "2.7.0"
+            image: "percona/percona-postgresql-operator:2.7.0-ppg15-postgres"
+            imagePullPolicy: Always
+            postgresVersion: {{ .observed.composite.resource.spec.parameters.version }}
+            instances:
+            - name: instance1
+              replicas: {{ .observed.composite.resource.spec.parameters.replicas }}
+              resources:
+                requests:
+                  memory: "256Mi"
+                  cpu: "100m"
+                limits:
+                  memory: "1Gi"
+                  cpu: "500m"
+              dataVolumeClaimSpec:
+                accessModes:
+                - ReadWriteOnce
+                resources:
+                  requests:
+                    storage: {{ .observed.composite.resource.spec.parameters.storageSize }}
+                storageClassName: local-path
+            backups:
+              enabled: true
+              pgbackrest:
+                image: "percona/percona-postgresql-operator:2.7.0-ppg15-postgres"
+                repos:
+                - name: repo1
+                  volume:
+                    volumeClaimSpec:
+                      accessModes:
+                      - ReadWriteOnce
+                      resources:
+                        requests:
+                          storage: "1Gi"
+                      storageClassName: local-path
+            proxy:
+              pgBouncer:
+                image: "percona/percona-postgresql-operator:2.6.0-ppg15-pgbouncer"
+            users:
+            - name: {{ .observed.composite.resource.spec.parameters.databaseName }}
+              databases:
+              - {{ .observed.composite.resource.spec.parameters.databaseName }}
+              secretName: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-name" | default .observed.composite.resource.metadata.name }}-user-secret
+  
+  - step: create-service
+    functionRef:
+      name: function-go-templating
+    input:
+      apiVersion: gotemplating.fn.crossplane.io/v1beta1
+      kind: GoTemplate
+      source: Inline
+      inline:
+        template: |
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-name" | default .observed.composite.resource.metadata.name }}
+            namespace: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-namespace" | default "default" }}
+            annotations:
+              crossplane.io/external-name: {{ .observed.composite.resource.metadata.name }}
+              gotemplating.fn.crossplane.io/composition-resource-name: postgresql-service
+          spec:
+            type: ClusterIP
+            ports:
+            - name: postgresql
+              port: 5432
+              targetPort: 5432
+              protocol: TCP
+            selector:
+              postgres-operator.crunchydata.com/cluster: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-name" | default .observed.composite.resource.metadata.name }}
+              postgres-operator.crunchydata.com/instance-set: instance1

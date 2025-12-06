@@ -1,0 +1,75 @@
+apiVersion: apiextensions.crossplane.io/v1
+kind: CompositeResourceDefinition
+metadata:
+  name: xpostgresqls.database.example.org
+spec:
+  group: database.example.org
+  names:
+    kind: XPostgreSQL
+    plural: xpostgresqls
+  claimNames:
+    kind: PostgreSQLInstance
+    plural: postgresqlinstances
+  versions:
+  - name: v1alpha1
+    served: true
+    referenceable: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        properties:
+          spec:
+            type: object
+            properties:
+              parameters:
+                type: object
+                properties:
+                  storageSize:
+                    type: string
+                    description: "Size of the PostgreSQL storage (e.g., '10Gi')"
+                    default: "10Gi"
+                  version:
+                    type: string
+                    description: "PostgreSQL version"
+                    default: "15"
+                  replicas:
+                    type: integer
+                    description: "Number of PostgreSQL replicas"
+                    default: 1
+                  databaseName:
+                    type: string
+                    description: "Name of the database to create"
+                    default: "postgres"
+                required:
+                - storageSize
+                - version
+            required:
+            - parameters
+          status:
+            type: object
+            properties:
+              connectionString:
+                type: string
+                description: "Database connection string"
+              endpoint:
+                type: string
+                description: "Database endpoint"
+              ready:
+                type: boolean
+                description: "Whether the database is ready"
+    additionalPrinterColumns:
+    - name: STORAGE
+      type: string
+      jsonPath: .spec.parameters.storageSize
+    - name: VERSION
+      type: string
+      jsonPath: .spec.parameters.version
+    - name: REPLICAS
+      type: integer
+      jsonPath: .spec.parameters.replicas
+    - name: READY
+      type: string
+      jsonPath: .status.conditions[?(@.type=='Ready')].status
+    - name: SYNCED
+      type: string
+      jsonPath: .status.conditions[?(@.type=='Synced')].status
