@@ -3,14 +3,14 @@
 To provision a new PostgreSQL database, create a `XPostgreSQL` custom resource.
 (See `PostgresXRD.yaml` and `PostgresComp.yaml` for definition)
 
-### Example: 
+### Example
 
-`my-db.yaml`
+`PostgresSampleDB.yaml`
 
 Apply it to the cluster:
 
 ```bash
-kubectl apply -f my-db.yaml
+kubectl apply -f PostgresSampleDB.yaml
 ```
 
 ## Accessing the Database
@@ -33,7 +33,7 @@ The database is deployed directly into the **same namespace** where you created 
 
 ```bash
 # Get the password from the secret in your namespace
-kubectl get secret my-db-user-secret -n my-ns -o jsonpath="{.data.password}" | base64 -d
+kubectl get secret my-pg-db-user-secret -n my-pg-ns -o jsonpath="{.data.password}" | base64 -d
 ```
 
 ### Testing Connectivity
@@ -43,7 +43,7 @@ You can verify connectivity and run SQL queries using a temporary client pod.
 1.  **Deploy a Client Pod:**
 
     ```bash
-    kubectl run postgres-client --rm -it --image=postgres:15 --restart=Never --namespace my-ns -- bash
+    kubectl run postgres-client --rm -it --image=postgres:15 --restart=Never --namespace my-pg-ns -- bash
     ```
 
 2.  **Connect to the Database:**
@@ -52,7 +52,7 @@ You can verify connectivity and run SQL queries using a temporary client pod.
 
     ```bash
     # Replace <password> with the actual password retrieved above
-    PGPASSWORD='<password>' psql -h my-db -U mydb -d mydb
+    PGPASSWORD='<password>' psql -h my-pg-db -U my-pg-db -d my-pg-db
     ```
 
 3.  **Run SQL Commands:**

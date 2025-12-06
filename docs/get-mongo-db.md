@@ -3,25 +3,14 @@
 To provision a new MongoDB database cluster, create a `XMongoDB` custom resource.
 (See `MongoXRD.yaml` and `MongoComp.yaml` for definition)
 
-## Example: `my-mongo.yaml`
+## Example
 
-```yaml
-apiVersion: database.example.org/v1alpha1
-kind: MongoDBInstance
-metadata:
-  name: my-mongo
-  namespace: my-app-ns
-spec:
-  parameters:
-    storageSize: 5Gi
-    version: "6.0.24-19"
-    replicas: 1
-```
+`MongoSampleDB.yaml`
 
 Apply it to the cluster:
 
 ```bash
-kubectl apply -f my-mongo.yaml
+kubectl apply -f MongoSampleDB.yaml
 ```
 
 ## Accessing the Database
@@ -41,7 +30,7 @@ The database is deployed directly into the **same namespace** where you created 
 ### Retrieving Credentials
 
 ```bash
-kubectl get secret my-mongo-secrets -n my-app-ns -o jsonpath='{.data.MONGODB_DATABASE_ADMIN_PASSWORD}' | base64 -d
+kubectl get secret my-mongo-db-secrets -n my-mongo-ns -o jsonpath='{.data.MONGODB_DATABASE_ADMIN_PASSWORD}' | base64 -d
 ```
 
 ### Setup Notes
@@ -53,9 +42,9 @@ kubectl get secret my-mongo-secrets -n my-app-ns -o jsonpath='{.data.MONGODB_DAT
 ## Checking Status
 
 ```bash
-kubectl get perconaservermongodb -n psmdb
-kubectl get perconaservermongodbs.psmdb.percona.com
-kubectl get pods -n psmdb
+# Check resources in your target namespace (e.g., default)
+kubectl get perconaservermongodb -n my-mongo-ns
+kubectl get pods -n my-mongo-ns
 ```
 
 ## Connecting to MongoDB
@@ -63,34 +52,50 @@ kubectl get pods -n psmdb
 ### Get Admin Password
 
 ```bash
-# Get the database admin password (note: the % at the end is a terminal artifact, don't include it)
-kubectl get secret -n psmdb internal-my-mongo-cluster-users -o jsonpath='{.data.MONGODB_DATABASE_ADMIN_PASSWORD}' | base64 -d
+# Get the database admin password from the secret in YOUR namespace
+# The secret name is usually <claim-name>-secrets
+kubectl get secret -n my-mongo-ns my-mongo-db-secrets -o jsonpath='{.data.MONGODB_DATABASE_ADMIN_PASSWORD}' | base64 -d
 ```
 
 ### Connect using mongosh (non-SSL for testing)
 
 ```bash
 # Replace <password> with the password from above (without the % if present)
-mongosh "mongodb://databaseAdmin:<password>@my-mongo-cluster-rs0-0.my-mongo-cluster-rs0.psmdb.svc.cluster.local:27017/admin"
+# Host format: <cluster-name>-rs0.<namespace>.svc.cluster.local
+mongosh "mongodb://databaseAdmin:<password>@my-mongo-db-rs0.my-mongo-ns.svc.cluster.local:27017/admin"
 ```
 
-## Testing
+## Testing Connectivity
+ 
+1.  **Retrieve Password:**
 
-1. **Create a test pod:**
+    ```bash
+    kubectl get secret -n my-mongo-ns my-mongo-db-secrets -o jsonpath='{.data.MONGODB_DATABASE_ADMIN_PASSWORD}' | base64 -d
+    ```
 
-   ```bash
-   kubectl run mongo-test --rm -it --image=mongo:6.0 -- bash
-   ```
+2.  **Start a Client Shell:**
 
-2. **Copy test script (optional):**
+    Start a temporary pod with MongoDB tools installed:
 
-   ```bash
-   kubectl cp mongo-test.js mongo-test:/tmp/
-   ```
+    ```bash
+    kubectl run mongo-test-client --rm -it --image=percona/percona-server-mongodb:6.0.24-19 --restart=Never --namespace my-mongo-ns -- bash
+    ```
 
-3. **Run Test:**
+3.  **Connect via Mongosh:**
 
-   Connect as shown above and run commands or execute the script.
+    Inside the pod, run the connection command (replace `<password>`):
+    
+    ```bash
+    # Connect to the primary replica
+    mongosh "mongodb://databaseAdmin:<password>@my-mongo-db-rs0.my-mongo-ns.svc.cluster.local:27017/admin?ssl=false"
+    ```
+
+4.  **Run Commands:**
+
+    ```javascript
+    db.adminCommand('ping')
+    show dbs
+    ```
 
 ## Troubleshooting
 
@@ -99,8 +104,9 @@ mongosh "mongodb://databaseAdmin:<password>@my-mongo-cluster-rs0-0.my-mongo-clus
 If deleting the MongoDB cluster hangs due to finalizers:
 
 ```bash
-# Remove the finalizer
-kubectl patch perconaservermongodb -n psmdb my-mongo-cluster -p '{"metadata":{"finalizers":[]}}' --type=merge
+# Remove the finalizer (replace <namespace> and <cluster-name>)
+kubectl patch perconaservermongodb -n <namespace> <cluster-name> -p '{"metadata":{"finalizers":[]}}' --type=merge
+
 # Then delete the CR
-kubectl delete perconaservermongodb -n psmdb my-mongo-cluster
+kubectl delete perconaservermongodb -n <namespace> <cluster-name>
 ```

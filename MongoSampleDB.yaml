@@ -1,0 +1,10 @@
+apiVersion: database.example.org/v1alpha1
+kind: MongoDBInstance
+metadata:
+  name: my-mongo-db
+  namespace: my-mongo-ns
+spec:
+  parameters:
+    storageSize: 1Gi
+    version: "6.0.24-19"
+    replicas: 1

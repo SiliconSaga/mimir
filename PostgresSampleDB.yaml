@@ -1,14 +1,14 @@
 apiVersion: database.example.org/v1alpha1
 kind: PostgreSQLInstance
 metadata:
-  name: my-db
-  namespace: my-ns
+  name: my-pg-db
+  namespace: my-pg-ns
 spec:
   parameters:
     storageSize: 1Gi
     version: "15"
     replicas: 1
-    databaseName: mydb
+    databaseName: my-pg-db
   compositionSelector:
     matchLabels:
       provider: percona

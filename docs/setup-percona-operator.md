@@ -8,14 +8,30 @@ This guide covers the installation of Percona Operators for PostgreSQL and Mongo
 - [kubectl](https://kubernetes.io/docs/tasks/tools/install-kubectl/) installed
 - [Helm](https://helm.sh/docs/intro/install/) installed
 
-## 1. Install Percona PostgreSQL Operator
+## 1. Setup Infrastructure
+
+### Consolidated Namespace
+
+We use a single namespace `percona-system` for all database operators.
+
+```bash
+kubectl create ns percona-system
+```
+
+### Install RBAC for Crossplane
+
+For Crossplane to provision Percona resources, it needs permission. Apply the RBAC configuration:
+
+```bash
+kubectl apply -f rbac.yaml
+```
+
+## 2. Install Percona PostgreSQL Operator
 
 ### Install CRDs (One-time setup)
 
 ```bash
-kubectl apply --server-side -f https://raw.githubusercontent.com/percona/percona-postgresql-operator/v2.6.0/deploy/crd.yaml
-# (Optional but recommended) Install RBAC for the operator
-kubectl apply -f https://raw.githubusercontent.com/percona/percona-postgresql-operator/v2.6.0/deploy/rbac.yaml -n pgo
+kubectl apply --server-side -f https://raw.githubusercontent.com/percona/percona-postgresql-operator/v2.7.0/deploy/crd.yaml
 ```
 
 ### Install Operator via Helm
@@ -23,20 +39,18 @@ kubectl apply -f https://raw.githubusercontent.com/percona/percona-postgresql-op
 ```bash
 helm repo add percona https://percona.github.io/percona-helm-charts/
 helm repo update
-helm install pgo-operator \
-  --namespace pgo \
-  --create-namespace \
+helm install percona-postgresql-operator \
+  --namespace percona-system \
+  --set watchNamespace="" \
   percona/pg-operator
 ```
 
-## 2. Install Percona MongoDB Operator
+## 3. Install Percona MongoDB Operator
 
 ```bash
-helm repo add percona https://percona.github.io/percona-helm-charts/
-helm repo update
 helm install psmdb-operator \
-  --namespace psmdb \
-  --create-namespace \
+  --namespace percona-system \
+  --set watchAllNamespaces=true \
   percona/psmdb-operator
 ```
 
