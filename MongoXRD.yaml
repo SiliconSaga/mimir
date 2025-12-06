@@ -1,0 +1,68 @@
+apiVersion: apiextensions.crossplane.io/v1
+kind: CompositeResourceDefinition
+metadata:
+  name: xmongodbs.database.example.org
+spec:
+  group: database.example.org
+  names:
+    kind: XMongoDB
+    plural: xmongodbs
+  claimNames:
+    kind: MongoDBInstance
+    plural: mongodbinstances
+  versions:
+  - name: v1alpha1
+    served: true
+    referenceable: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        properties:
+          spec:
+            type: object
+            properties:
+              parameters:
+                type: object
+                properties:
+                  storageSize:
+                    type: string
+                    description: "Size of the MongoDB storage (e.g., '1Gi')"
+                    default: "1Gi"
+                  version:
+                    type: string
+                    description: "MongoDB version"
+                    default: "6.0.24-19"
+                  replicas:
+                    type: integer
+                    description: "Number of MongoDB replicas"
+                    default: 1
+                required:
+                - storageSize
+                - version
+            required:
+            - parameters
+          status:
+            type: object
+            properties:
+              connectionString:
+                type: string
+                description: "Database connection string"
+              ready:
+                type: boolean
+                description: "Whether the database is ready"
+    additionalPrinterColumns:
+    - name: STORAGE
+      type: string
+      jsonPath: .spec.parameters.storageSize
+    - name: VERSION
+      type: string
+      jsonPath: .spec.parameters.version
+    - name: REPLICAS
+      type: integer
+      jsonPath: .spec.parameters.replicas
+    - name: READY
+      type: string
+      jsonPath: .status.conditions[?(@.type=='Ready')].status
+    - name: SYNCED
+      type: string
+      jsonPath: .status.conditions[?(@.type=='Synced')].status

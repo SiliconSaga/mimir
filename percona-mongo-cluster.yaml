@@ -17,10 +17,18 @@ spec:
   secrets:
     users: my-mongo-cluster-secrets
     encryptionKey: my-mongo-cluster-mongodb-encryption-key
+    pmm: pmm-secret
   pmm:
     enabled: true
     image: percona/pmm-client:2.39.0
     serverHost: monitoring-service.pmm.svc.cluster.local
+    resources:
+      requests:
+        memory: "32M"
+        cpu: "100m"
+      limits:
+        memory: "1G"
+        cpu: "1"
   replsets:
     - name: rs0
       size: 1
@@ -32,12 +40,12 @@ spec:
       podDisruptionBudget:
         maxUnavailable: 1
       resources:
-        limits:
-          cpu: "300m"
-          memory: "0.5G"
         requests:
-          cpu: "300m"
           memory: "0.5G"
+          cpu: "300m"
+        limits:
+          memory: "0.5G"
+          cpu: "300m"
       volumeSpec:
         persistentVolumeClaim:
           resources:

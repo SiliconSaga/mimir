@@ -12,7 +12,7 @@ This directory contains configuration for running enterprise-grade databases usi
 *   [**Manual Cluster Config**](percona-postgres-cluster.yaml): Reference manifest for manually creating a PerconaPGCluster (bypassing Crossplane).
 
 ### 🍃 MongoDB
-*   [**Provision MongoDB**](docs/get-mongo-db.md): How to manually create a MongoDB cluster (Crossplane support pending).
+*   [**Provision MongoDB**](docs/get-mongo-db.md): How to create a MongoDB database using Crossplane (`MongoDBInstance`).
 
 ### 📊 Observability
 *   [**PMM Setup**](docs/observability-pmm.md): Monitoring your databases with Percona Monitoring and Management.
@@ -24,8 +24,10 @@ This directory contains configuration for running enterprise-grade databases usi
 
 *   `PostgresComp.yaml`: Crossplane Composition for PostgreSQL.
 *   `PostgresXRD.yaml`: Crossplane CompositeResourceDefinition for PostgreSQL.
+*   `MongoComp.yaml`: Crossplane Composition for MongoDB.
+*   `MongoXRD.yaml`: Crossplane CompositeResourceDefinition for MongoDB.
 *   `percona-postgres-cluster.yaml`: Reference CR for PostgreSQL.
 *   `percona-mongo-cluster.yaml`: Reference CR for MongoDB.
 
 ## Future Work
-*   See [**TODO.md**](TODO.md) for planned improvements like Loki integration and XMongoDB support.
+*   See [**TODO.md**](TODO.md) for planned improvements like Loki integration and XMySQL support.

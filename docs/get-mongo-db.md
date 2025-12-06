@@ -1,26 +1,54 @@
 # Getting a MongoDB Database
 
-> [!NOTE]
-> Currently, MongoDB provisioning is manual. A Crossplane composition (XMongoDB) is planned for the future.
+To provision a new MongoDB database cluster, create a `XMongoDB` custom resource.
+(See `MongoXRD.yaml` and `MongoComp.yaml` for definition)
 
-## Prerequisites
+## Example: `my-mongo.yaml`
 
-- Percona MongoDB Operator installed (see [Setup](setup-percona-operator.md))
+```yaml
+apiVersion: database.example.org/v1alpha1
+kind: MongoDBInstance
+metadata:
+  name: my-mongo
+  namespace: my-app-ns
+spec:
+  parameters:
+    storageSize: 5Gi
+    version: "6.0.24-19"
+    replicas: 1
+```
 
-## Create a MongoDB Cluster
-
-Use the `percona-mongo-cluster.yaml` manifest:
+Apply it to the cluster:
 
 ```bash
-kubectl apply -f percona-mongo-cluster.yaml
+kubectl apply -f my-mongo.yaml
+```
+
+## Accessing the Database
+
+The database is deployed directly into the **same namespace** where you created the `MongoDBInstance` claim.
+
+### Connection Details
+
+*   **Namespace**: Your application namespace (e.g., `my-app-ns`)
+*   **Host**: `my-mongo.my-app-ns.svc.cluster.local` (or whatever the Service is named)
+*   **Port**: `27017`
+*   **User/Password**: 
+    *   The Percona Operator automatically generates secrets.
+    *   Secret Name: `my-mongo-secrets` (based on claim name)
+    *   Keys: `MONGODB_DATABASE_ADMIN_PASSWORD`, `MONGODB_CLUSTER_ADMIN_PASSWORD`, etc.
+
+### Retrieving Credentials
+
+```bash
+kubectl get secret my-mongo-secrets -n my-app-ns -o jsonpath='{.data.MONGODB_DATABASE_ADMIN_PASSWORD}' | base64 -d
 ```
 
 ### Setup Notes
 
-- The MongoDB image version should be specified as `percona/percona-server-mongodb:6.0.24-19` (or latest available version)
-- The backup configuration requires a storage section, even for local testing
-- For development/testing with a single-node replica set, set `allowUnsafeConfigurations: true` in the CR
-- For production, use at least 3 nodes and set `allowUnsafeConfigurations: false`
+*   **Replicas**: Default is 1. For production, set to 3.
+*   **Backup**: Logical backups are enabled by default (local storage).
+
 
 ## Checking Status
 

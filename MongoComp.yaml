@@ -1,0 +1,96 @@
+apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+metadata:
+  name: xmongodb-percona
+  labels:
+    provider: percona
+    service: mongodb
+spec:
+  mode: Pipeline
+  writeConnectionSecretsToNamespace: crossplane-system
+  compositeTypeRef:
+    apiVersion: database.example.org/v1alpha1
+    kind: XMongoDB
+  pipeline:
+  - step: create-percona-mongodb
+    functionRef:
+      name: function-go-templating
+    input:
+      apiVersion: gotemplating.fn.crossplane.io/v1beta1
+      kind: GoTemplate
+      source: Inline
+      inline:
+        template: |
+          apiVersion: psmdb.percona.com/v1
+          kind: PerconaServerMongoDB
+          metadata:
+            name: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-name" | default .observed.composite.resource.metadata.name }}
+            namespace: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-namespace" | default "default" }}
+            annotations:
+              crossplane.io/external-name: {{ .observed.composite.resource.metadata.name }}
+              gotemplating.fn.crossplane.io/composition-resource-name: percona-mongodb
+          spec:
+            crVersion: 1.15.0
+            image: "percona/percona-server-mongodb:{{ .observed.composite.resource.spec.parameters.version }}"
+            imagePullPolicy: Always
+            allowUnsafeConfigurations: true
+            secrets:
+              users: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-name" | default .observed.composite.resource.metadata.name }}-secrets
+            replsets:
+            - name: rs0
+              size: {{ .observed.composite.resource.spec.parameters.replicas }}
+              volumeSpec:
+                persistentVolumeClaim:
+                  resources:
+                    requests:
+                      storage: {{ .observed.composite.resource.spec.parameters.storageSize }}
+                  storageClassName: local-path
+              podDisruptionBudget:
+                maxUnavailable: 1
+            sharding:
+              enabled: false
+            backup:
+              enabled: true
+              image: percona/percona-backup-mongodb:2.3.0
+              storages:
+                local-storage:
+                  type: filesystem
+                  filesystem:
+                    path: /backup
+              tasks:
+              - name: daily-backup
+                schedule: "0 0 * * *"
+                enabled: true
+                storageName: local-storage
+                keep: 7
+                type: logical
+
+  - step: create-service
+    functionRef:
+      name: function-go-templating
+    input:
+      apiVersion: gotemplating.fn.crossplane.io/v1beta1
+      kind: GoTemplate
+      source: Inline
+      inline:
+        template: |
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-name" | default .observed.composite.resource.metadata.name }}
+            namespace: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-namespace" | default "default" }}
+            annotations:
+              crossplane.io/external-name: {{ .observed.composite.resource.metadata.name }}
+              gotemplating.fn.crossplane.io/composition-resource-name: mongodb-service
+          spec:
+            type: ClusterIP
+            ports:
+            - name: mongodb
+              port: 27017
+              targetPort: 27017
+              protocol: TCP
+            selector:
+              app.kubernetes.io/name: percona-server-mongodb
+              app.kubernetes.io/instance: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-name" | default .observed.composite.resource.metadata.name }}
+              app.kubernetes.io/component: mongod
+              app.kubernetes.io/part-of: percona-server-mongodb

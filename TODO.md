@@ -8,9 +8,6 @@
     - Integrating with PMM's Grafana instance
 - **PMM MongoDB Integration**: The sidecar container is not appearing in MongoDB pods despite proper secret configuration. Needs investigation.
 
-## MongoDB
-- **XMongoDB**: Create a Crossplane CompositeResourceDefinition (XRD) and Composition for MongoDB, similar to `XPostgreSQL`. 
-
 ## MySQL
 - **XMySQL**: Create a Crossplane CompositeResourceDefinition (XRD) and Composition for MySQL, similar to `XPostgreSQL`. 
 

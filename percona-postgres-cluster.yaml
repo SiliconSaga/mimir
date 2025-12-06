@@ -43,4 +43,8 @@ spec:
     enabled: true
     image: percona/pmm-client:2.44.0
     serverHost: monitoring-service.pmm.svc.cluster.local
-    secret: pmm-secret 
+    secret: pmm-secret
+  patroni:
+    pg_hba:
+      - host all all 10.42.0.0/16 md5
+      - host all all all md5 
