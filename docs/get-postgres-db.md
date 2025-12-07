@@ -1,15 +1,14 @@
-## Requesting a PostgreSQL Database
+# Requesting a PostgreSQL Database
 
 To provision a new PostgreSQL database, create a `XPostgreSQL` custom resource.
 (See `PostgresXRD.yaml` and `PostgresComp.yaml` for definition)
 
-### Example
+## Example
 
-`PostgresSampleDB.yaml`
-
-Apply it to the cluster:
+Apply to cluster:
 
 ```bash
+kubectl create ns my-pg-ns
 kubectl apply -f PostgresSampleDB.yaml
 ```
 

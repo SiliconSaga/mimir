@@ -14,6 +14,9 @@ This directory contains configuration for running enterprise-grade databases usi
 ### 🍃 MongoDB
 *   [**Provision MongoDB**](docs/get-mongo-db.md): How to create a MongoDB database using Crossplane (`MongoDBInstance`).
 
+### 🐬 MySQL (PXC)
+*   [**Provision MySQL**](docs/get-mysql-db.md): How to create a MySQL database using Crossplane (`MySQLInstance`).
+
 ### 📊 Observability
 *   [**PMM Setup**](docs/observability-pmm.md): Monitoring your databases with Percona Monitoring and Management.
 
@@ -26,6 +29,8 @@ This directory contains configuration for running enterprise-grade databases usi
 *   `PostgresXRD.yaml`: Crossplane CompositeResourceDefinition for PostgreSQL.
 *   `MongoComp.yaml`: Crossplane Composition for MongoDB.
 *   `MongoXRD.yaml`: Crossplane CompositeResourceDefinition for MongoDB.
+*   `MySQLComp.yaml`: Crossplane Composition for MySQL (PXC).
+*   `MySQLXRD.yaml`: Crossplane CompositeResourceDefinition for MySQL.
 *   `percona-postgres-cluster.yaml`: Reference CR for PostgreSQL.
 *   `percona-mongo-cluster.yaml`: Reference CR for MongoDB.
 

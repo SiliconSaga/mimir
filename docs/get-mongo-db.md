@@ -5,11 +5,10 @@ To provision a new MongoDB database cluster, create a `XMongoDB` custom resource
 
 ## Example
 
-`MongoSampleDB.yaml`
-
-Apply it to the cluster:
+Apply to cluster:
 
 ```bash
+kubectl create ns my-mongo-ns
 kubectl apply -f MongoSampleDB.yaml
 ```
 

@@ -1,0 +1,10 @@
+apiVersion: database.example.org/v1alpha1
+kind: MySQLInstance
+metadata:
+  name: my-mysql-db
+  namespace: my-mysql-ns
+spec:
+  parameters:
+    storageSize: 1Gi
+    version: "8.0"
+    replicas: 1

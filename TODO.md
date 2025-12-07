@@ -7,9 +7,3 @@
     - Configuring log retention policies
     - Integrating with PMM's Grafana instance
 - **PMM MongoDB Integration**: The sidecar container is not appearing in MongoDB pods despite proper secret configuration. Needs investigation.
-
-## MySQL
-- **XMySQL**: Create a Crossplane CompositeResourceDefinition (XRD) and Composition for MySQL, similar to `XPostgreSQL`. 
-
-## Cleanup
-- **KubeDB**: Verify if all KubeDB related manifests (`kubedb-*.yaml`) can be safely removed if we are fully committed to Percona + Crossplane.

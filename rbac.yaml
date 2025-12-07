@@ -15,6 +15,12 @@ rules:
 - apiGroups: ["psmdb.percona.com"]
   resources: ["perconaservermongodbs/status", "perconaservermongodbbackups/status", "perconaservermongodbrestores/status"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["pxc.percona.com"]
+  resources: ["perconaxtradbclusters", "perconaxtradbclusterbackups", "perconaxtradbclusterrestores"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["pxc.percona.com"]
+  resources: ["perconaxtradbclusters/status", "perconaxtradbclusterbackups/status", "perconaxtradbclusterrestores/status"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1

@@ -54,6 +54,15 @@ helm install psmdb-operator \
   percona/psmdb-operator
 ```
 
+## 4. Install Percona MySQL (PXC) Operator
+
+```bash
+helm install pxc-operator \
+  --namespace percona-system \
+  --set watchAllNamespaces=true \
+  percona/pxc-operator
+```
+
 ## Verification
 
 Check that operators are running:

@@ -1,0 +1,72 @@
+apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+metadata:
+  name: xmysql-percona
+  labels:
+    provider: percona
+    db: mysql
+spec:
+  mode: Pipeline
+  compositeTypeRef:
+    apiVersion: database.example.org/v1alpha1
+    kind: XMySQL
+  pipeline:
+  - step: create-pxc-cluster
+    functionRef:
+      name: function-go-templating
+    input:
+      apiVersion: gotemplating.fn.crossplane.io/v1beta1
+      kind: GoTemplate
+      source: Inline
+      inline:
+        template: |
+          apiVersion: pxc.percona.com/v1
+          kind: PerconaXtraDBCluster
+          metadata:
+            name: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-name" | default .observed.composite.resource.metadata.name }}
+            namespace: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-namespace" | default "default" }}
+            annotations:
+              crossplane.io/external-name: {{ .observed.composite.resource.metadata.name }}
+              gotemplating.fn.crossplane.io/composition-resource-name: percona-pxc
+          spec:
+            crVersion: 1.13.0
+            secretsName: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-name" | default .observed.composite.resource.metadata.name }}-secrets
+            pxc:
+              size: {{ .observed.composite.resource.spec.parameters.replicas }}
+              image: percona/percona-xtradb-cluster:8.0.32-24.2
+              volumeSpec:
+                persistentVolumeClaim:
+                  resources:
+                    requests:
+                      storage: {{ .observed.composite.resource.spec.parameters.storageSize }}
+                  storageClassName: local-path
+            haproxy:
+              enabled: true
+              size: {{ .observed.composite.resource.spec.parameters.replicas }}
+              image: percona/percona-xtradb-cluster-operator:1.13.0-haproxy
+
+  - step: create-service
+    functionRef:
+      name: function-go-templating
+    input:
+      apiVersion: gotemplating.fn.crossplane.io/v1beta1
+      kind: GoTemplate
+      source: Inline
+      inline:
+        template: |
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-name" | default .observed.composite.resource.metadata.name }}
+            namespace: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-namespace" | default "default" }}
+            annotations:
+              crossplane.io/external-name: {{ .observed.composite.resource.metadata.name }}
+              gotemplating.fn.crossplane.io/composition-resource-name: pxc-service
+          spec:
+            ports:
+            - port: 3306
+              targetPort: 3306
+            selector:
+              app.kubernetes.io/name: percona-xtradb-cluster
+              app.kubernetes.io/instance: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-name" | default .observed.composite.resource.metadata.name }}
+              app.kubernetes.io/component: haproxy

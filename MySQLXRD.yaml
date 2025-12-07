@@ -1,0 +1,49 @@
+apiVersion: apiextensions.crossplane.io/v1
+kind: CompositeResourceDefinition
+metadata:
+  name: xmysqls.database.example.org
+spec:
+  group: database.example.org
+  names:
+    kind: XMySQL
+    plural: xmysqls
+  claimNames:
+    kind: MySQLInstance
+    plural: mysqlinstances
+  versions:
+  - name: v1alpha1
+    served: true
+    referenceable: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        properties:
+          spec:
+            type: object
+            properties:
+              parameters:
+                type: object
+                properties:
+                  storageSize:
+                    type: string
+                    default: "10Gi"
+                  version:
+                    type: string
+                    default: "8.0"
+                  replicas:
+                    type: integer
+                    default: 3
+                required:
+                - storageSize
+                - version
+                - replicas
+            required:
+            - parameters
+          status:
+            type: object
+            properties:
+              address:
+                type: string
+                description: The address to connect to the database.
+  defaultCompositionRef:
+    name: xmysql-percona
