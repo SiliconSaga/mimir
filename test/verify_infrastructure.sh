@@ -10,11 +10,11 @@ echo -e "${GREEN}Starting Mimir Infrastructure Verification${NC}"
 
 # Check Kafka Claim
 echo "Checking KafkaCluster Claim..."
-kubectl wait --for=condition=Ready kafkacluster/kafka-test -n mimir --timeout=60s || echo -e "${RED}Kafka Claim not ready, checking underlying resource...${NC}"
+kubectl wait --for=condition=Ready kafkacluster/kafka-test -n mimir --timeout=300s || { echo -e "${RED}KafkaCluster Claim not ready${NC}"; exit 1; }
 
 # Check Valkey Claim
 echo "Checking ValkeyCluster Claim..."
-kubectl wait --for=condition=Ready valkeycluster/valkey-test -n mimir --timeout=60s || echo -e "${RED}Claim not ready, checking underlying resource...${NC}"
+kubectl wait --for=condition=Ready valkeycluster/valkey-test -n mimir --timeout=60s || { echo -e "${RED}ValkeyCluster Claim not ready${NC}"; exit 1; }
 
 # Valkey Functional Check
 echo "Validating Valkey Connection..."

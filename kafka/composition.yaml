@@ -19,13 +19,16 @@ spec:
       source: Inline
       inline:
         template: |
-          apiVersion: kubernetes.crossplane.io/v1alpha1
+          apiVersion: kubernetes.crossplane.io/v1alpha2
           kind: Object
           metadata:
             name: {{ .observed.composite.resource.metadata.name }}-kafka
             annotations:
               gotemplating.fn.crossplane.io/composition-resource-name: kafka-cluster
           spec:
+            readiness:
+              policy: DeriveFromCelQuery
+              celQuery: "object.status.conditions.exists(c, c.type == 'Ready' && c.status == 'True')"
             forProvider:
               manifest:
                 apiVersion: kafka.strimzi.io/v1beta2
@@ -33,10 +36,12 @@ spec:
                 metadata:
                   name: {{ .observed.composite.resource.metadata.name }}
                   namespace: kafka-system
+                  annotations:
+                    strimzi.io/node-pools: enabled
+                    strimzi.io/kraft: enabled
                 spec:
                   kafka:
-                    version: 3.6.0
-                    replicas: {{ .observed.composite.resource.spec.parameters.replicas }}
+                    version: 4.0.0
                     listeners:
                       - name: plain
                         port: 9092
@@ -47,23 +52,39 @@ spec:
                         type: internal
                         tls: true
                     config:
-                      offsets.topic.replication.factor: 3
-                      transaction.state.log.replication.factor: 3
-                      transaction.state.log.min.isr: 2
+                      offsets.topic.replication.factor: 1
+                      transaction.state.log.replication.factor: 1
+                      transaction.state.log.min.isr: 1
                       log.retention.hours: {{ .observed.composite.resource.spec.parameters.retentionHours }}
-                    storage:
-                      type: jbod
-                      volumes:
-                      - id: 0
-                        type: persistent-claim
-                        size: {{ .observed.composite.resource.spec.parameters.storageSize }}
-                        class: local-path
-                  zookeeper:
-                    replicas: 3
-                    storage:
-                      type: persistent-claim
-                      size: 10Gi
-                      class: local-path
                   entityOperator:
                     topicOperator: {}
                     userOperator: {}
+          ---
+          apiVersion: kubernetes.crossplane.io/v1alpha2
+          kind: Object
+          metadata:
+            name: {{ .observed.composite.resource.metadata.name }}-nodepool
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: kafka-nodepool
+          spec:
+            readiness:
+              policy: DeriveFromCelQuery
+              celQuery: "object.status.conditions.exists(c, c.type == 'Ready' && c.status == 'True')"
+            forProvider:
+              manifest:
+                apiVersion: kafka.strimzi.io/v1beta2
+                kind: KafkaNodePool
+                metadata:
+                  name: {{ .observed.composite.resource.metadata.name }}-pool
+                  namespace: kafka-system
+                  labels:
+                    strimzi.io/cluster: {{ .observed.composite.resource.metadata.name }}
+                spec:
+                  replicas: {{ .observed.composite.resource.spec.parameters.replicas }}
+                  roles:
+                    - controller
+                    - broker
+                  storage:
+                    type: persistent-claim
+                    size: {{ .observed.composite.resource.spec.parameters.storageSize }}
+                    class: local-path

@@ -19,13 +19,16 @@ spec:
       source: Inline
       inline:
         template: |
-          apiVersion: kubernetes.crossplane.io/v1alpha1
+          apiVersion: kubernetes.crossplane.io/v1alpha2
           kind: Object
           metadata:
             name: {{ .observed.composite.resource.metadata.name }}-valkey
             annotations:
               gotemplating.fn.crossplane.io/composition-resource-name: valkey-cluster
           spec:
+            readiness:
+              policy: DeriveFromCelQuery
+              celQuery: "has(object.status.readyLeaderReplicas) && object.status.readyLeaderReplicas == 3"
             forProvider:
               manifest:
                 apiVersion: redis.redis.opstreelabs.in/v1beta2
