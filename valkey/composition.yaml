@@ -1,0 +1,51 @@
+apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+metadata:
+  name: xvalkeycluster-ot-container-kit
+  labels:
+    provider: ot-container-kit
+spec:
+  mode: Pipeline
+  compositeTypeRef:
+    apiVersion: mimir.siliconsaga.org/v1alpha1
+    kind: XValkeyCluster
+  pipeline:
+  - step: deploy-valkey
+    functionRef:
+      name: function-go-templating
+    input:
+      apiVersion: gotemplating.fn.crossplane.io/v1beta1
+      kind: GoTemplate
+      source: Inline
+      inline:
+        template: |
+          apiVersion: kubernetes.crossplane.io/v1alpha1
+          kind: Object
+          metadata:
+            name: {{ .observed.composite.resource.metadata.name }}-valkey
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: valkey-cluster
+          spec:
+            forProvider:
+              manifest:
+                apiVersion: redis.redis.opstreelabs.in/v1beta2
+                kind: RedisCluster
+                metadata:
+                  name: {{ .observed.composite.resource.metadata.name }}
+                  namespace: valkey-system
+                spec:
+                  clusterSize: {{ .observed.composite.resource.spec.parameters.replicas }}
+                  kubernetesConfig:
+                    image: valkey/valkey:8.0
+                    imagePullPolicy: IfNotPresent
+                  redisExporter:
+                    enabled: false
+                    image: quay.io/opstree/redis-exporter:v1.44.0
+                  storage:
+                    volumeClaimTemplate:
+                      spec:
+                        storageClassName: local-path
+                        accessModes: ["ReadWriteOnce"]
+                        resources:
+                          requests:
+                            storage: {{ .observed.composite.resource.spec.parameters.storageSize }}

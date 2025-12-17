@@ -1,0 +1,10 @@
+apiVersion: mimir.siliconsaga.org/v1alpha1
+kind: KafkaCluster
+metadata:
+  name: kafka-test
+  namespace: mimir
+spec:
+  parameters:
+    replicas: 1
+    retentionHours: 24
+    storageSize: "5Gi"

@@ -1,0 +1,13 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: valkey-verify-job
+spec:
+  template:
+    spec:
+      containers:
+      - name: verify
+        image: valkey/valkey:8.0
+        command: ["sh", "-c", "valkey-cli -h valkey-test-valkey-leader.valkey-system.svc -p 6379 ping | grep PONG"]
+      restartPolicy: Never
+  backoffLimit: 1

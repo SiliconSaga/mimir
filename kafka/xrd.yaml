@@ -1,0 +1,47 @@
+apiVersion: apiextensions.crossplane.io/v1
+kind: CompositeResourceDefinition
+metadata:
+  name: xkafkaclusters.mimir.siliconsaga.org
+spec:
+  group: mimir.siliconsaga.org
+  names:
+    kind: XKafkaCluster
+    plural: xkafkaclusters
+  claimNames:
+    kind: KafkaCluster
+    plural: kafkaclusters
+  versions:
+  - name: v1alpha1
+    served: true
+    referenceable: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        properties:
+          spec:
+            type: object
+            properties:
+              parameters:
+                type: object
+                properties:
+                  replicas:
+                    type: integer
+                    default: 1
+                    description: "Number of Kafka Brokers"
+                  retentionHours:
+                    type: integer
+                    default: 72
+                    description: "Log Retention in Hours"
+                  storageSize:
+                    type: string
+                    default: "10Gi"
+                required:
+                - replicas
+            required:
+            - parameters
+          status:
+            type: object
+            properties:
+              bootstrapServer:
+                type: string
+                description: "Bootstrap Server Address"

@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: valkey-debug-node1
+spec:
+  nodeName: k3d-refr-k8s-agent-1
+  containers:
+  - name: debug
+    image: valkey/valkey:8.0
+    command: ["sleep", "3600"]

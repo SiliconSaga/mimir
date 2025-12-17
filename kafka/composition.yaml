@@ -1,0 +1,69 @@
+apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+metadata:
+  name: xkafkacluster-strimzi
+  labels:
+    provider: strimzi
+spec:
+  mode: Pipeline
+  compositeTypeRef:
+    apiVersion: mimir.siliconsaga.org/v1alpha1
+    kind: XKafkaCluster
+  pipeline:
+  - step: deploy-kafka
+    functionRef:
+      name: function-go-templating
+    input:
+      apiVersion: gotemplating.fn.crossplane.io/v1beta1
+      kind: GoTemplate
+      source: Inline
+      inline:
+        template: |
+          apiVersion: kubernetes.crossplane.io/v1alpha1
+          kind: Object
+          metadata:
+            name: {{ .observed.composite.resource.metadata.name }}-kafka
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: kafka-cluster
+          spec:
+            forProvider:
+              manifest:
+                apiVersion: kafka.strimzi.io/v1beta2
+                kind: Kafka
+                metadata:
+                  name: {{ .observed.composite.resource.metadata.name }}
+                  namespace: kafka-system
+                spec:
+                  kafka:
+                    version: 3.6.0
+                    replicas: {{ .observed.composite.resource.spec.parameters.replicas }}
+                    listeners:
+                      - name: plain
+                        port: 9092
+                        type: internal
+                        tls: false
+                      - name: tls
+                        port: 9093
+                        type: internal
+                        tls: true
+                    config:
+                      offsets.topic.replication.factor: 3
+                      transaction.state.log.replication.factor: 3
+                      transaction.state.log.min.isr: 2
+                      log.retention.hours: {{ .observed.composite.resource.spec.parameters.retentionHours }}
+                    storage:
+                      type: jbod
+                      volumes:
+                      - id: 0
+                        type: persistent-claim
+                        size: {{ .observed.composite.resource.spec.parameters.storageSize }}
+                        class: local-path
+                  zookeeper:
+                    replicas: 3
+                    storage:
+                      type: persistent-claim
+                      size: 10Gi
+                      class: local-path
+                  entityOperator:
+                    topicOperator: {}
+                    userOperator: {}

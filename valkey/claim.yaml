@@ -1,0 +1,9 @@
+apiVersion: mimir.siliconsaga.org/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: valkey-test
+  namespace: mimir
+spec:
+  parameters:
+    replicas: 3
+    storageSize: "1Gi"
