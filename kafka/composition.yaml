@@ -69,7 +69,7 @@ spec:
           spec:
             readiness:
               policy: DeriveFromCelQuery
-              celQuery: "object.status.conditions.exists(c, c.type == 'Ready' && c.status == 'True')"
+              celQuery: "has(object.status.replicas) && object.status.replicas == 1"
             forProvider:
               manifest:
                 apiVersion: kafka.strimzi.io/v1beta2
