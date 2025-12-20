@@ -20,30 +20,49 @@ spec:
       source: Inline
       inline:
         template: |
-          apiVersion: pxc.percona.com/v1
-          kind: PerconaXtraDBCluster
+          apiVersion: kubernetes.crossplane.io/v1alpha2
+          kind: Object
           metadata:
-            name: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-name" | default .observed.composite.resource.metadata.name }}
-            namespace: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-namespace" | default "default" }}
+            name: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-name" | default .observed.composite.resource.metadata.name }}-pxc
             annotations:
-              crossplane.io/external-name: {{ .observed.composite.resource.metadata.name }}
               gotemplating.fn.crossplane.io/composition-resource-name: percona-pxc
           spec:
-            crVersion: 1.13.0
-            secretsName: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-name" | default .observed.composite.resource.metadata.name }}-secrets
-            pxc:
-              size: {{ .observed.composite.resource.spec.parameters.replicas }}
-              image: percona/percona-xtradb-cluster:8.0.32-24.2
-              volumeSpec:
-                persistentVolumeClaim:
-                  resources:
-                    requests:
-                      storage: {{ .observed.composite.resource.spec.parameters.storageSize }}
-                  storageClassName: local-path
-            haproxy:
-              enabled: true
-              size: {{ .observed.composite.resource.spec.parameters.replicas }}
-              image: percona/percona-xtradb-cluster-operator:1.13.0-haproxy
+            readiness:
+              policy: DeriveFromCelQuery
+              celQuery: "object.status.state == 'ready'"
+            forProvider:
+              manifest:
+                apiVersion: pxc.percona.com/v1
+                kind: PerconaXtraDBCluster
+                metadata:
+                  name: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-name" | default .observed.composite.resource.metadata.name }}
+                  namespace: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-namespace" | default "default" }}
+                  annotations:
+                    crossplane.io/external-name: {{ .observed.composite.resource.metadata.name }}
+                spec:
+                  crVersion: 1.13.0
+                  allowUnsafeConfigurations: true
+                  secretsName: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-name" | default .observed.composite.resource.metadata.name }}-secrets
+                  pxc:
+                    size: {{ .observed.composite.resource.spec.parameters.replicas }}
+                    image: percona/percona-xtradb-cluster:8.0.32-24.2
+                    volumeSpec:
+                      persistentVolumeClaim:
+                        resources:
+                          requests:
+                            storage: {{ .observed.composite.resource.spec.parameters.storageSize }}
+                        storageClassName: local-path
+                  haproxy:
+                    enabled: true
+                    size: {{ .observed.composite.resource.spec.parameters.replicas }}
+                    image: percona/percona-xtradb-cluster-operator:1.13.0-haproxy
+                    resources:
+                      requests:
+                        memory: "256Mi"
+                        cpu: "100m"
+                      limits:
+                        memory: "1Gi"
+                        cpu: "500m"
 
   - step: create-service
     functionRef:
@@ -54,19 +73,34 @@ spec:
       source: Inline
       inline:
         template: |
-          apiVersion: v1
-          kind: Service
+          apiVersion: kubernetes.crossplane.io/v1alpha2
+          kind: Object
           metadata:
-            name: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-name" | default .observed.composite.resource.metadata.name }}
-            namespace: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-namespace" | default "default" }}
+            name: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-name" | default .observed.composite.resource.metadata.name }}-service
             annotations:
-              crossplane.io/external-name: {{ .observed.composite.resource.metadata.name }}
               gotemplating.fn.crossplane.io/composition-resource-name: pxc-service
           spec:
-            ports:
-            - port: 3306
-              targetPort: 3306
-            selector:
-              app.kubernetes.io/name: percona-xtradb-cluster
-              app.kubernetes.io/instance: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-name" | default .observed.composite.resource.metadata.name }}
-              app.kubernetes.io/component: haproxy
+            readiness:
+              policy: DeriveFromCelQuery
+              celQuery: "true"
+            forProvider:
+              manifest:
+                apiVersion: v1
+                kind: Service
+                metadata:
+                  name: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-name" | default .observed.composite.resource.metadata.name }}
+                  namespace: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-namespace" | default "default" }}
+                  annotations:
+                    crossplane.io/external-name: {{ .observed.composite.resource.metadata.name }}
+                spec:
+                  ports:
+                  - port: 3306
+                    targetPort: 3306
+                  selector:
+                    app.kubernetes.io/name: percona-xtradb-cluster
+                    app.kubernetes.io/instance: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-name" | default .observed.composite.resource.metadata.name }}
+                    app.kubernetes.io/component: haproxy
+
+  - step: automatically-detect-readiness
+    functionRef:
+      name: function-auto-ready

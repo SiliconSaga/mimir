@@ -29,9 +29,22 @@ To interact with Mimir services, ensure you have the appropriate `Claim` definit
 
 Mimir uses [kuttl](https://kuttl.dev/) for Kubernetes-native e2e testing, with BDD scenarios documented in `features/infrastructure.feature`.
 
-| Method | Command | Use Case |
-|--------|---------|----------|
-| Quick check | `./test/verify_infrastructure.sh` | Manual verification |
-| Full e2e | `kubectl kuttl test tests/e2e/` | Comprehensive testing |
+```bash
+# Run all e2e tests (creates isolated test resources, cleans up after)
+kubectl kuttl test tests/e2e/
+
+# Run specific test
+kubectl kuttl test tests/e2e/ --test kafka-provisioning
+```
+
+### Test Coverage
+
+| Component | Test | Provisioning Time |
+|-----------|------|-------------------|
+| Kafka (Strimzi) | `kafka-provisioning` | ~65s |
+| Valkey (OT-Container-Kit) | `valkey-provisioning` | ~38s |
+| PostgreSQL (Percona) | `postgres-provisioning` | ~2-3min |
+| MySQL (Percona) | `mysql-provisioning` | ~2-3min |
+| MongoDB (Percona) | `mongodb-provisioning` | ~2-3min |
 
 See [**Testing Strategy**](./docs/testing.md) for details on the testing approach and how it fits within the broader ecosystem.

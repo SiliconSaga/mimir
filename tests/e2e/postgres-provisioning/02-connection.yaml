@@ -1,0 +1,19 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestStep
+commands:
+  - script: |
+      set -e -o pipefail
+      sleep 5
+      echo "Waiting for secret pg-e2e-test-user-secret in ${NAMESPACE}..."
+      for i in $(seq 1 30); do
+        if kubectl get secret pg-e2e-test-user-secret -n $NAMESPACE >/dev/null 2>&1; then
+          echo "Secret found."
+          break
+        fi
+        echo "Secret not found yet, waiting..."
+        sleep 2
+      done
+      PGPASSWORD=$(kubectl get secret pg-e2e-test-user-secret -n $NAMESPACE -o jsonpath='{.data.password}' | base64 -d)
+      kubectl run pg-client --namespace $NAMESPACE --image=postgres:15 --restart=Never --env="PGPASSWORD=$PGPASSWORD" --command -- psql -h pg-e2e-test -U testdb -d testdb -c "SELECT 1;"
+      kubectl wait --for=condition=Ready pod/pg-client -n $NAMESPACE --timeout=300s
+      kubectl logs pg-client -n $NAMESPACE

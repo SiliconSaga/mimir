@@ -1,0 +1,12 @@
+# Assert: PostgreSQLInstance claim is Ready
+apiVersion: database.example.org/v1alpha1
+kind: PostgreSQLInstance
+metadata:
+  name: pg-e2e-test
+status:
+  conditions:
+  - type: Synced
+    status: "True"
+  - type: Ready
+    status: "True"
+
