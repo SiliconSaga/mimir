@@ -1,0 +1,13 @@
+# Assert: ValkeyCluster claim is Ready
+apiVersion: mimir.siliconsaga.org/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: valkey-test
+  namespace: mimir
+status:
+  conditions:
+  - type: Synced
+    status: "True"
+  - type: Ready
+    status: "True"
+

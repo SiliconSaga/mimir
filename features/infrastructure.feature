@@ -8,6 +8,11 @@ Feature: Mimir Infrastructure Layer
     Then the "Kafka" cluster should be ready in "kafka-system"
     And the Crossplane claim "kafka-test" should be "Ready"
 
+  Scenario: Kafka Functional Validation
+    Given the KafkaCluster Claim "kafka-test" is applied
+    Then I should be able to list topics on the Kafka cluster
+    And I should be able to create a test topic
+
   Scenario: Valkey Provisioning
     Given the ValkeyCluster Claim "valkey-test" is applied
     Then the "rediscluster" should be ready in "valkey-system"

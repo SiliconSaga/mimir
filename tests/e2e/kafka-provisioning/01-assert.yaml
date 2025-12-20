@@ -1,0 +1,13 @@
+# Assert: KafkaCluster claim is Ready
+apiVersion: mimir.siliconsaga.org/v1alpha1
+kind: KafkaCluster
+metadata:
+  name: kafka-test
+  namespace: mimir
+status:
+  conditions:
+  - type: Synced
+    status: "True"
+  - type: Ready
+    status: "True"
+

@@ -21,12 +21,17 @@ Enterprise-grade SQL and NoSQL databases powered by **Percona Operators**.
 - **Supported**: PostgreSQL, MySQL (XtraDB), MongoDB.
 - **Use Case**: Primary relational or document storage.
 
-## usage
+## Usage
 
 To interact with Mimir services, ensure you have the appropriate `Claim` definitions in your namespace.
 
-### Validation
-Run the verification script to check the health of the infrastructure layer:
-```bash
-./test/verify_infrastructure.sh
-```
+## Testing
+
+Mimir uses [kuttl](https://kuttl.dev/) for Kubernetes-native e2e testing, with BDD scenarios documented in `features/infrastructure.feature`.
+
+| Method | Command | Use Case |
+|--------|---------|----------|
+| Quick check | `./test/verify_infrastructure.sh` | Manual verification |
+| Full e2e | `kubectl kuttl test tests/e2e/` | Comprehensive testing |
+
+See [**Testing Strategy**](./docs/testing.md) for details on the testing approach and how it fits within the broader ecosystem.

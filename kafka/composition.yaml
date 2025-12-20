@@ -1,0 +1,113 @@
+apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+metadata:
+  name: xkafkacluster-strimzi
+  labels:
+    provider: strimzi
+spec:
+  mode: Pipeline
+  compositeTypeRef:
+    apiVersion: mimir.siliconsaga.org/v1alpha1
+    kind: XKafkaCluster
+  pipeline:
+  - step: deploy-kafka
+    functionRef:
+      name: function-go-templating
+    input:
+      apiVersion: gotemplating.fn.crossplane.io/v1beta1
+      kind: GoTemplate
+      source: Inline
+      inline:
+        template: |
+          apiVersion: kubernetes.crossplane.io/v1alpha2
+          kind: Object
+          metadata:
+            name: {{ .observed.composite.resource.metadata.name }}-kafka
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: kafka-cluster
+          spec:
+            readiness:
+              policy: DeriveFromCelQuery
+              celQuery: "object.status.conditions.exists(c, c.type == 'Ready' && c.status == 'True')"
+            forProvider:
+              manifest:
+                apiVersion: kafka.strimzi.io/v1beta2
+                kind: Kafka
+                metadata:
+                  name: {{ .observed.composite.resource.metadata.name }}
+                  namespace: kafka-system
+                  annotations:
+                    strimzi.io/kraft: "enabled"
+                    strimzi.io/node-pools: "enabled"
+                spec:
+                  kafka:
+                    version: {{ .observed.composite.resource.spec.parameters.version | default "4.0.0" }}
+                    listeners:
+                    - name: plain
+                      port: 9092
+                      type: internal
+                      tls: false
+                    - name: tls
+                      port: 9093
+                      type: internal
+                      tls: true
+                    config:
+                      offsets.topic.replication.factor: {{ min 3 .observed.composite.resource.spec.parameters.replicas }}
+                      transaction.state.log.replication.factor: {{ min 3 .observed.composite.resource.spec.parameters.replicas }}
+                      transaction.state.log.min.isr: {{ min 2 .observed.composite.resource.spec.parameters.replicas }}
+                      default.replication.factor: {{ min 3 .observed.composite.resource.spec.parameters.replicas }}
+                      min.insync.replicas: {{ min 2 .observed.composite.resource.spec.parameters.replicas }}
+                  entityOperator:
+                    topicOperator: {}
+                    userOperator: {}
+
+  - step: deploy-kafka-node-pool
+    functionRef:
+      name: function-go-templating
+    input:
+      apiVersion: gotemplating.fn.crossplane.io/v1beta1
+      kind: GoTemplate
+      source: Inline
+      inline:
+        template: |
+          apiVersion: kubernetes.crossplane.io/v1alpha2
+          kind: Object
+          metadata:
+            name: {{ .observed.composite.resource.metadata.name }}-nodepool
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: kafka-nodepool
+          spec:
+            readiness:
+              policy: DeriveFromCelQuery
+              celQuery: "object.status.replicas == {{ .observed.composite.resource.spec.parameters.replicas }}"
+            forProvider:
+              manifest:
+                apiVersion: kafka.strimzi.io/v1beta2
+                kind: KafkaNodePool
+                metadata:
+                  name: {{ .observed.composite.resource.metadata.name }}-combined
+                  namespace: kafka-system
+                  labels:
+                    strimzi.io/cluster: {{ .observed.composite.resource.metadata.name }}
+                spec:
+                  replicas: {{ .observed.composite.resource.spec.parameters.replicas }}
+                  roles:
+                  - controller
+                  - broker
+                  storage:
+                    type: persistent-claim
+                    size: {{ .observed.composite.resource.spec.parameters.storageSize | default "10Gi" }}
+                    class: local-path
+                    deleteClaim: false
+                  resources:
+                    requests:
+                      memory: "512Mi"
+                      cpu: "250m"
+                    limits:
+                      memory: "2Gi"
+                      cpu: "1"
+
+  - step: auto-ready
+    functionRef:
+      name: function-auto-ready
+

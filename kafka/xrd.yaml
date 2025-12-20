@@ -1,0 +1,69 @@
+apiVersion: apiextensions.crossplane.io/v1
+kind: CompositeResourceDefinition
+metadata:
+  name: xkafkaclusters.mimir.siliconsaga.org
+spec:
+  group: mimir.siliconsaga.org
+  names:
+    kind: XKafkaCluster
+    plural: xkafkaclusters
+  claimNames:
+    kind: KafkaCluster
+    plural: kafkaclusters
+  versions:
+  - name: v1alpha1
+    served: true
+    referenceable: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        properties:
+          spec:
+            type: object
+            properties:
+              parameters:
+                type: object
+                properties:
+                  replicas:
+                    type: integer
+                    default: 3
+                    minimum: 1
+                    description: "Number of Kafka broker nodes (KRaft controllers + brokers combined)"
+                  storageSize:
+                    type: string
+                    default: "10Gi"
+                    description: "Storage size per broker node"
+                  version:
+                    type: string
+                    default: "4.0.0"
+                    description: "Kafka version"
+                required:
+                - replicas
+            required:
+            - parameters
+          status:
+            type: object
+            properties:
+              bootstrapServers:
+                type: string
+                description: "Kafka bootstrap server address"
+              clusterId:
+                type: string
+                description: "Kafka cluster ID"
+    additionalPrinterColumns:
+    - name: REPLICAS
+      type: integer
+      jsonPath: .spec.parameters.replicas
+    - name: STORAGE
+      type: string
+      jsonPath: .spec.parameters.storageSize
+    - name: BOOTSTRAP
+      type: string
+      jsonPath: .status.bootstrapServers
+    - name: READY
+      type: string
+      jsonPath: .status.conditions[?(@.type=='Ready')].status
+    - name: SYNCED
+      type: string
+      jsonPath: .status.conditions[?(@.type=='Synced')].status
+
