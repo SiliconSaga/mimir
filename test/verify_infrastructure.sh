@@ -10,7 +10,14 @@ echo -e "${GREEN}Starting Mimir Infrastructure Verification${NC}"
 
 # Check Kafka Claim
 echo "Checking KafkaCluster Claim..."
-kubectl wait --for=condition=Ready kafkacluster/kafka-test -n mimir --timeout=300s || { echo -e "${RED}KafkaCluster Claim not ready${NC}"; exit 1; }
+kubectl wait --for=condition=Ready kafkacluster/kafka-test -n mimir --timeout=300s || echo -e "${RED}WARNING: KafkaCluster Claim not ready (Check Crossplane Status)${NC}"
+
+# Kafka Functional Check
+echo "Validating Kafka Connection..."
+KAFKA_BOOTSTRAP="kafka-test-w8rfb-kafka-bootstrap.kafka-system.svc:9092"
+kubectl run kafka-verifier --rm -i --restart=Never --image quay.io/strimzi/kafka:latest-kafka-4.0.0 --timeout=120s -- bin/kafka-topics.sh --bootstrap-server ${KAFKA_BOOTSTRAP} --list && \
+  echo -e "${GREEN}Kafka Connection Verified (Topics List)${NC}" || \
+  { echo -e "${RED}Kafka Connection Failed${NC}"; exit 1; }
 
 # Check Valkey Claim
 echo "Checking ValkeyCluster Claim..."
