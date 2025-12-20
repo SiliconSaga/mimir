@@ -1,0 +1,15 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestSuite
+metadata:
+  name: mimir-e2e
+testDirs:
+- ./tests/e2e
+timeout: 600  # 10 minutes per step (new clusters take time to provision)
+parallel: 1   # Run tests sequentially (resource constraints)
+skipDelete: false  # Clean up claims after tests (cascades to delete clusters)
+# Note: 
+# - Each test creates NEW isolated Kafka/Valkey clusters
+# - Claims are created in kuttl's generated test namespace
+# - Deleting the namespace cascades to delete claims → composites → clusters
+# - For debugging, set skipDelete: true to inspect resources after tests
+
