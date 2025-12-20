@@ -29,14 +29,16 @@ pipeline {
         stage('Test Infrastructure') {
             steps {
                 container('builder') {
-                        // Running Real Tests (Integration Mode)
-                        // This generates the cucumber.json from the actual .feature files in the workspace.
+                    // Running Real Tests (Integration Mode)
+                    // This generates the cucumber.json from the actual .feature files in the workspace.
+                    script {
                         try {
                             sh "behave -f json.pretty -o cucumber.json features/"
                         } catch (Exception e) {
                             echo "Behave tests failed (some scenarios failed). Continuing pipeline to ingest results."
                             // We don't error out because Vordu wants to visualize the failure.
                         }
+                    }
                 }
             }
             post {
