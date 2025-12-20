@@ -1,5 +1,4 @@
-# Mimir: The Memory (System)
-# NOTE: Move this file to d:/Dev/GitWS/mimir/catalog-info.yaml once the repo is initialized.
+# Mimir: The Memory - Data Management (System)
 apiVersion: backstage.io/v1alpha1
 kind: System
 metadata:
@@ -7,6 +6,7 @@ metadata:
   description: The persistent data and state layer.
   annotations:
     vordu.io/row-label: "Data Services"
+    vordu.io/granularity: "system"
 spec:
   owner: cervator
   domain: yggdrasil
