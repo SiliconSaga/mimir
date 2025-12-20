@@ -1,0 +1,12 @@
+# Apply the KafkaCluster claim
+apiVersion: mimir.siliconsaga.org/v1alpha1
+kind: KafkaCluster
+metadata:
+  name: kafka-test
+  namespace: mimir
+spec:
+  parameters:
+    replicas: 3
+    storageSize: "10Gi"
+    version: "4.0.0"
+

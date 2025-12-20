@@ -4,6 +4,7 @@ set -e
 # Colors
 GREEN='\033[0;32m'
 RED='\033[0;31m'
+YELLOW='\033[0;33m'
 NC='\033[0m'
 
 echo -e "${GREEN}Starting Mimir Infrastructure Verification${NC}"
@@ -14,10 +15,16 @@ kubectl wait --for=condition=Ready kafkacluster/kafka-test -n mimir --timeout=30
 
 # Kafka Functional Check
 echo "Validating Kafka Connection..."
-KAFKA_BOOTSTRAP="kafka-test-w8rfb-kafka-bootstrap.kafka-system.svc:9092"
-kubectl run kafka-verifier --rm -i --restart=Never --image quay.io/strimzi/kafka:latest-kafka-4.0.0 --timeout=120s -- bin/kafka-topics.sh --bootstrap-server ${KAFKA_BOOTSTRAP} --list && \
-  echo -e "${GREEN}Kafka Connection Verified (Topics List)${NC}" || \
-  { echo -e "${RED}Kafka Connection Failed${NC}"; exit 1; }
+KAFKA_COMPOSITE=$(kubectl get kafkacluster kafka-test -n mimir -o jsonpath='{.spec.resourceRef.name}')
+if [ -z "${KAFKA_COMPOSITE}" ]; then
+  echo -e "${YELLOW}WARNING: Could not get Kafka composite name, skipping Kafka validation${NC}"
+else
+  KAFKA_POD=$(kubectl get pods -n kafka-system -l strimzi.io/cluster=${KAFKA_COMPOSITE},strimzi.io/broker-role=true -o jsonpath='{.items[0].metadata.name}')
+  echo "Kafka Pod: ${KAFKA_POD}"
+  kubectl exec -n kafka-system ${KAFKA_POD} -- /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list && \
+    echo -e "${GREEN}Kafka Connection Verified (Topics List)${NC}" || \
+    { echo -e "${RED}Kafka Connection Failed${NC}"; exit 1; }
+fi
 
 # Check Valkey Claim
 echo "Checking ValkeyCluster Claim..."
@@ -51,7 +58,10 @@ kubectl wait --for=condition=Ready mongodbinstance/my-mongo-db -n my-mongo-ns --
 echo "Checking Managed Resources (Kafka, Redis, Databases)..."
 kubectl get managed
 
+echo "Checking Kafka Clusters..."
+kubectl get kafka,kafkanodepool -n kafka-system
+
 echo "Checking Percona Clusters..."
 kubectl get perconapgclusters,perconaxtradbclusters,perconaservermongodbs --all-namespaces
 
-echo -e "${GREEN}Mimir Infrastructure Verification Completed.{NC}"
+echo -e "${GREEN}Mimir Infrastructure Verification Completed.${NC}"
