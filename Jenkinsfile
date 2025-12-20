@@ -29,43 +29,14 @@ pipeline {
         stage('Test Infrastructure') {
             steps {
                 container('builder') {
-                    script {
-                        echo "Running BDD Infrastructure Tests..."
-                        // Start KinD or connect to cluster here in real life.
-                        // For prototype: We generate a mock report representing the 'Current State'
-                        
-                        // Constructing a realistic report based on what we expect from Mimir's status
-                        // (Kafka: Phase 1 Pass, Phase 2 Pending; Valkey: Phase 1 Pass; Percona: Mixed)
-                        def mockReport = [
-                            [
-                                uri: 'features/kafka.feature',
-                                elements: [
-                                    [
-                                        type: 'scenario', 
-                                        tags: [[name: '@component:mimir-kafka'], [name: '@phase:1']],
-                                        steps: [[result: [status: 'passed']]]
-                                    ],
-                                    [
-                                        type: 'scenario', 
-                                        tags: [[name: '@component:mimir-kafka'], [name: '@phase:2']],
-                                        steps: [[result: [status: 'undefined']]] // implicit pending
-                                    ]
-                                ]
-                            ],
-                            [
-                                uri: 'features/valkey.feature',
-                                elements: [
-                                    [
-                                        type: 'scenario', 
-                                        tags: [[name: '@component:mimir-valkey'], [name: '@phase:1']],
-                                        steps: [[result: [status: 'passed']]]
-                                    ]
-                                ]
-                            ]
-                        ]
-                        
-                        writeFile file: 'cucumber.json', text: groovy.json.JsonOutput.toJson(mockReport)
-                    }
+                        // Running Real Tests (Integration Mode)
+                        // This generates the cucumber.json from the actual .feature files in the workspace.
+                        try {
+                            sh "behave -f json.pretty -o cucumber.json features/"
+                        } catch (Exception e) {
+                            echo "Behave tests failed (some scenarios failed). Continuing pipeline to ingest results."
+                            // We don't error out because Vordu wants to visualize the failure.
+                        }
                 }
             }
             post {
