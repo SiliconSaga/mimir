@@ -1,0 +1,43 @@
+apiVersion: pgv2.percona.com/v2
+kind: PerconaPGCluster
+metadata:
+  name: my-postgres-cluster
+  namespace: manual-test
+spec:
+  crVersion: 2.6.0
+  image: percona/percona-postgresql-operator:2.6.0-ppg16.8-postgres
+  imagePullPolicy: Always
+  postgresVersion: 16
+  instances:
+    - name: instance1
+      replicas: 1
+      dataVolumeClaimSpec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi
+  backups:
+    pgbackrest:
+      image: percona/percona-postgresql-operator:2.6.0-ppg16.8-pgbackrest2.54.2
+      repos:
+      - name: repo1
+        schedules:
+          full: "0 0 * * *"
+        volume:
+          volumeClaimSpec:
+            accessModes:
+            - ReadWriteOnce
+            resources:
+              requests:
+                storage: 1Gi
+  pmm:
+    enabled: false
+    image: percona/pmm-client:2.44.0
+    secret: pmm-secret
+    serverHost: monitoring-service.pmm.svc.cluster.local
+  proxy:
+    pgBouncer:
+      replicas: 1
+      image: percona/percona-postgresql-operator:2.6.0-ppg16.8-pgbouncer1.24.0
+  patroni: {}

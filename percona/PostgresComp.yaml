@@ -21,58 +21,75 @@ spec:
       source: Inline
       inline:
         template: |
-          apiVersion: pgv2.percona.com/v2
-          kind: PerconaPGCluster
+          apiVersion: kubernetes.crossplane.io/v1alpha2
+          kind: Object
           metadata:
-            name: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-name" | default .observed.composite.resource.metadata.name }}
-            namespace: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-namespace" | default "default" }}
+            name: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-name" | default .observed.composite.resource.metadata.name }}-pg
             annotations:
-              crossplane.io/external-name: {{ .observed.composite.resource.metadata.name }}
               gotemplating.fn.crossplane.io/composition-resource-name: percona-postgresql
           spec:
-            crVersion: "2.7.0"
-            image: "percona/percona-postgresql-operator:2.7.0-ppg15-postgres"
-            imagePullPolicy: Always
-            postgresVersion: {{ .observed.composite.resource.spec.parameters.version }}
-            instances:
-            - name: instance1
-              replicas: {{ .observed.composite.resource.spec.parameters.replicas }}
-              resources:
-                requests:
-                  memory: "256Mi"
-                  cpu: "100m"
-                limits:
-                  memory: "1Gi"
-                  cpu: "500m"
-              dataVolumeClaimSpec:
-                accessModes:
-                - ReadWriteOnce
-                resources:
-                  requests:
-                    storage: {{ .observed.composite.resource.spec.parameters.storageSize }}
-                storageClassName: local-path
-            backups:
-              enabled: true
-              pgbackrest:
-                image: "percona/percona-postgresql-operator:2.7.0-ppg15-postgres"
-                repos:
-                - name: repo1
-                  volume:
-                    volumeClaimSpec:
+            readiness:
+              policy: DeriveFromCelQuery
+              celQuery: "object.status.state == 'ready'"
+            forProvider:
+              manifest:
+                apiVersion: pgv2.percona.com/v2
+                kind: PerconaPGCluster
+                metadata:
+                  name: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-name" | default .observed.composite.resource.metadata.name }}
+                  namespace: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-namespace" | default "default" }}
+                  annotations:
+                    crossplane.io/external-name: {{ .observed.composite.resource.metadata.name }}
+                spec:
+                  image: "percona/percona-postgresql-operator:2.7.0-ppg15-postgres"
+                  imagePullPolicy: Always
+                  postgresVersion: {{ .observed.composite.resource.spec.parameters.version }}
+                  instances:
+                  - name: instance1
+                    replicas: {{ .observed.composite.resource.spec.parameters.replicas }}
+                    resources:
+                      requests:
+                        memory: "256Mi"
+                        cpu: "100m"
+                      limits:
+                        memory: "1Gi"
+                        cpu: "500m"
+                    dataVolumeClaimSpec:
                       accessModes:
                       - ReadWriteOnce
                       resources:
                         requests:
-                          storage: "1Gi"
+                          storage: {{ .observed.composite.resource.spec.parameters.storageSize }}
                       storageClassName: local-path
-            proxy:
-              pgBouncer:
-                image: "percona/percona-postgresql-operator:2.6.0-ppg15-pgbouncer"
-            users:
-            - name: {{ .observed.composite.resource.spec.parameters.databaseName }}
-              databases:
-              - {{ .observed.composite.resource.spec.parameters.databaseName }}
-              secretName: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-name" | default .observed.composite.resource.metadata.name }}-user-secret
+                  backups:
+                    enabled: true
+                    pgbackrest:
+                      image: "percona/percona-postgresql-operator:2.7.0-ppg15-postgres"
+                      repos:
+                      - name: repo1
+                        volume:
+                          volumeClaimSpec:
+                            accessModes:
+                            - ReadWriteOnce
+                            resources:
+                              requests:
+                                storage: "1Gi"
+                            storageClassName: local-path
+                  proxy:
+                    pgBouncer:
+                      image: "percona/percona-postgresql-operator:2.6.0-ppg15-pgbouncer"
+                      resources:
+                        requests:
+                          memory: "128Mi"
+                          cpu: "100m"
+                        limits:
+                          memory: "512Mi"
+                          cpu: "250m"
+                  users:
+                  - name: {{ .observed.composite.resource.spec.parameters.databaseName }}
+                    databases:
+                    - {{ .observed.composite.resource.spec.parameters.databaseName }}
+                    secretName: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-name" | default .observed.composite.resource.metadata.name }}-user-secret
   
   - step: create-service
     functionRef:
@@ -83,21 +100,36 @@ spec:
       source: Inline
       inline:
         template: |
-          apiVersion: v1
-          kind: Service
+          apiVersion: kubernetes.crossplane.io/v1alpha2
+          kind: Object
           metadata:
-            name: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-name" | default .observed.composite.resource.metadata.name }}
-            namespace: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-namespace" | default "default" }}
+            name: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-name" | default .observed.composite.resource.metadata.name }}-service
             annotations:
-              crossplane.io/external-name: {{ .observed.composite.resource.metadata.name }}
               gotemplating.fn.crossplane.io/composition-resource-name: postgresql-service
           spec:
-            type: ClusterIP
-            ports:
-            - name: postgresql
-              port: 5432
-              targetPort: 5432
-              protocol: TCP
-            selector:
-              postgres-operator.crunchydata.com/cluster: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-name" | default .observed.composite.resource.metadata.name }}
-              postgres-operator.crunchydata.com/instance-set: instance1
+            readiness:
+              policy: DeriveFromCelQuery
+              celQuery: "true"
+            forProvider:
+              manifest:
+                apiVersion: v1
+                kind: Service
+                metadata:
+                  name: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-name" | default .observed.composite.resource.metadata.name }}
+                  namespace: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-namespace" | default "default" }}
+                  annotations:
+                    crossplane.io/external-name: {{ .observed.composite.resource.metadata.name }}
+                spec:
+                  type: ClusterIP
+                  ports:
+                  - name: postgresql
+                    port: 5432
+                    targetPort: 5432
+                    protocol: TCP
+                  selector:
+                    postgres-operator.crunchydata.com/cluster: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-name" | default .observed.composite.resource.metadata.name }}
+                    postgres-operator.crunchydata.com/instance-set: instance1
+
+  - step: automatically-detect-readiness
+    functionRef:
+      name: function-auto-ready

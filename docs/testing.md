@@ -77,18 +77,24 @@ containers:
 mimir/
 ├── features/
 │   └── infrastructure.feature    # BDD scenarios (documentation)
-├── tests/
-│   └── e2e/
-│       ├── kuttl-test.yaml       # Test suite configuration
-│       ├── kafka-provisioning/
-│       │   ├── 00-apply.yaml     # Apply claim
-│       │   └── 01-assert.yaml    # Assert ready state
-│       ├── valkey-provisioning/
-│       │   ├── 00-apply.yaml
-│       │   └── 01-assert.yaml
-│       └── ...
-└── test/
-    └── verify_infrastructure.sh  # Quick manual verification
+├── kuttl-test.yaml               # Test suite configuration
+└── tests/
+    └── e2e/
+        ├── kafka-provisioning/
+        │   ├── 00-apply.yaml     # Apply KafkaCluster claim
+        │   └── 01-assert.yaml    # Assert Ready state
+        ├── valkey-provisioning/
+        │   ├── 00-apply.yaml     # Apply ValkeyCluster claim
+        │   └── 01-assert.yaml    # Assert Ready state
+        ├── postgres-provisioning/
+        │   ├── 00-apply.yaml     # Apply PostgreSQLInstance claim
+        │   └── 01-assert.yaml    # Assert Ready state
+        ├── mysql-provisioning/
+        │   ├── 00-apply.yaml     # Apply MySQLInstance claim
+        │   └── 01-assert.yaml    # Assert Ready state
+        └── mongodb-provisioning/
+            ├── 00-apply.yaml     # Apply MongoDBInstance claim
+            └── 01-assert.yaml    # Assert Ready state
 ```
 
 ### Running Tests
@@ -122,18 +128,24 @@ Feature: Mimir Infrastructure Layer
 
 These scenarios are implemented by kuttl test cases (or the shell script for quick checks).
 
-## Quick Verification Script
+## Running Specific Tests
 
-For rapid manual testing without the full kuttl setup:
+For rapid testing of individual components:
 
 ```bash
-./test/verify_infrastructure.sh
+# Test only Kafka
+kubectl kuttl test tests/e2e/ --test kafka-provisioning --v 3
+
+# Test only Valkey
+kubectl kuttl test tests/e2e/ --test valkey-provisioning --v 3
+
+# Test only databases
+kubectl kuttl test tests/e2e/ --test postgres-provisioning --v 3
+kubectl kuttl test tests/e2e/ --test mysql-provisioning --v 3
+kubectl kuttl test tests/e2e/ --test mongodb-provisioning --v 3
 ```
 
-This script:
-- Checks all Crossplane claims are Ready
-- Validates functional connectivity (Kafka topics, Valkey PING)
-- Reports pass/fail status with colored output
+Each test creates isolated resources and cleans up automatically.
 
 ## Alternatives Considered
 
@@ -397,9 +409,19 @@ jobs:
 
 | Method | Use Case | Speed |
 |--------|----------|-------|
-| `verify_infrastructure.sh` | Quick manual check | Fast |
-| `kubectl kuttl test` | Full e2e validation | Medium |
+| `kubectl kuttl test --test <name>` | Single component validation | Fast (~1-3 min) |
+| `kubectl kuttl test tests/e2e/` | Full e2e validation | Medium (~10-15 min) |
 | CI pipeline | Automated regression | Slow (includes cluster setup) |
 
-The feature file remains the source of truth for expected behavior, while the test implementation varies based on context.
+### Test Coverage
+
+| Test | Component | API Group |
+|------|-----------|-----------|
+| `kafka-provisioning` | Strimzi Kafka (KRaft) | `mimir.siliconsaga.org` |
+| `valkey-provisioning` | OT-Container-Kit Redis | `mimir.siliconsaga.org` |
+| `postgres-provisioning` | Percona PostgreSQL | `database.example.org` |
+| `mysql-provisioning` | Percona XtraDB | `database.example.org` |
+| `mongodb-provisioning` | Percona MongoDB | `database.example.org` |
+
+The `features/infrastructure.feature` file remains the source of truth for expected behavior, while kuttl implements the actual test execution.
 

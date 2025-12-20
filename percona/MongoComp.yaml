@@ -21,50 +21,61 @@ spec:
       source: Inline
       inline:
         template: |
-          apiVersion: psmdb.percona.com/v1
-          kind: PerconaServerMongoDB
+          apiVersion: kubernetes.crossplane.io/v1alpha2
+          kind: Object
           metadata:
-            name: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-name" | default .observed.composite.resource.metadata.name }}
-            namespace: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-namespace" | default "default" }}
+            name: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-name" | default .observed.composite.resource.metadata.name }}-mongo
             annotations:
-              crossplane.io/external-name: {{ .observed.composite.resource.metadata.name }}
               gotemplating.fn.crossplane.io/composition-resource-name: percona-mongodb
           spec:
-            crVersion: 1.15.0
-            image: "percona/percona-server-mongodb:{{ .observed.composite.resource.spec.parameters.version }}"
-            imagePullPolicy: Always
-            allowUnsafeConfigurations: true
-            secrets:
-              users: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-name" | default .observed.composite.resource.metadata.name }}-secrets
-            replsets:
-            - name: rs0
-              size: {{ .observed.composite.resource.spec.parameters.replicas }}
-              volumeSpec:
-                persistentVolumeClaim:
-                  resources:
-                    requests:
-                      storage: {{ .observed.composite.resource.spec.parameters.storageSize }}
-                  storageClassName: local-path
-              podDisruptionBudget:
-                maxUnavailable: 1
-            sharding:
-              enabled: false
-            backup:
-              enabled: true
-              image: percona/percona-backup-mongodb:2.3.0
-              storages:
-                local-storage:
-                  type: filesystem
-                  filesystem:
-                    path: /backup
-              tasks:
-              - name: daily-backup
-                schedule: "0 0 * * *"
-                enabled: true
-                storageName: local-storage
-                keep: 7
-                type: logical
-
+            readiness:
+              policy: DeriveFromCelQuery
+              celQuery: "object.status.state == 'ready'"
+            forProvider:
+              manifest:
+                apiVersion: psmdb.percona.com/v1
+                kind: PerconaServerMongoDB
+                metadata:
+                  name: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-name" | default .observed.composite.resource.metadata.name }}
+                  namespace: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-namespace" | default "default" }}
+                  annotations:
+                    crossplane.io/external-name: {{ .observed.composite.resource.metadata.name }}
+                spec:
+                  crVersion: 1.15.0
+                  image: "percona/percona-server-mongodb:{{ .observed.composite.resource.spec.parameters.version }}"
+                  imagePullPolicy: Always
+                  allowUnsafeConfigurations: true
+                  secrets:
+                    users: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-name" | default .observed.composite.resource.metadata.name }}-secrets
+                  replsets:
+                  - name: rs0
+                    size: {{ .observed.composite.resource.spec.parameters.replicas }}
+                    volumeSpec:
+                      persistentVolumeClaim:
+                        resources:
+                          requests:
+                            storage: {{ .observed.composite.resource.spec.parameters.storageSize }}
+                        storageClassName: local-path
+                    podDisruptionBudget:
+                      maxUnavailable: 1
+                  sharding:
+                    enabled: false
+                  backup:
+                    enabled: true
+                    image: percona/percona-backup-mongodb:2.3.0
+                    storages:
+                      local-storage:
+                        type: filesystem
+                        filesystem:
+                          path: /backup
+                    tasks:
+                    - name: daily-backup
+                      schedule: "0 0 * * *"
+                      enabled: true
+                      storageName: local-storage
+                      keep: 7
+                      type: logical
+  
   - step: create-service
     functionRef:
       name: function-go-templating
@@ -74,23 +85,38 @@ spec:
       source: Inline
       inline:
         template: |
-          apiVersion: v1
-          kind: Service
+          apiVersion: kubernetes.crossplane.io/v1alpha2
+          kind: Object
           metadata:
-            name: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-name" | default .observed.composite.resource.metadata.name }}
-            namespace: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-namespace" | default "default" }}
+            name: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-name" | default .observed.composite.resource.metadata.name }}-service
             annotations:
-              crossplane.io/external-name: {{ .observed.composite.resource.metadata.name }}
               gotemplating.fn.crossplane.io/composition-resource-name: mongodb-service
           spec:
-            type: ClusterIP
-            ports:
-            - name: mongodb
-              port: 27017
-              targetPort: 27017
-              protocol: TCP
-            selector:
-              app.kubernetes.io/name: percona-server-mongodb
-              app.kubernetes.io/instance: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-name" | default .observed.composite.resource.metadata.name }}
-              app.kubernetes.io/component: mongod
-              app.kubernetes.io/part-of: percona-server-mongodb
+            readiness:
+              policy: DeriveFromCelQuery
+              celQuery: "true"
+            forProvider:
+              manifest:
+                apiVersion: v1
+                kind: Service
+                metadata:
+                  name: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-name" | default .observed.composite.resource.metadata.name }}
+                  namespace: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-namespace" | default "default" }}
+                  annotations:
+                    crossplane.io/external-name: {{ .observed.composite.resource.metadata.name }}
+                spec:
+                  type: ClusterIP
+                  ports:
+                  - name: mongodb
+                    port: 27017
+                    targetPort: 27017
+                    protocol: TCP
+                  selector:
+                    app.kubernetes.io/name: percona-server-mongodb
+                    app.kubernetes.io/instance: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-name" | default .observed.composite.resource.metadata.name }}
+                    app.kubernetes.io/component: mongod
+                    app.kubernetes.io/part-of: percona-server-mongodb
+  
+  - step: automatically-detect-readiness
+    functionRef:
+      name: function-auto-ready

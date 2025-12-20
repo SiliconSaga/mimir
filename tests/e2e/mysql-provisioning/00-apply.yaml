@@ -1,0 +1,13 @@
+# Apply a MySQL instance claim
+apiVersion: database.example.org/v1alpha1
+kind: MySQLInstance
+metadata:
+  name: mysql-e2e-test
+  labels:
+    mimir.siliconsaga.org/test: "true"
+spec:
+  parameters:
+    storageSize: 1Gi
+    version: "8.0"
+    replicas: 1
+

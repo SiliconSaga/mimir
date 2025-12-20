@@ -1,0 +1,19 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestStep
+commands:
+  - script: |
+      set -e -o pipefail
+      sleep 5
+      echo "Waiting for secret mysql-e2e-test-secrets in ${NAMESPACE}..."
+      for i in $(seq 1 30); do
+        if kubectl get secret mysql-e2e-test-secrets -n $NAMESPACE >/dev/null 2>&1; then
+          echo "Secret found."
+          break
+        fi
+        echo "Secret not found yet, waiting..."
+        sleep 2
+      done
+      MYSQL_PWD=$(kubectl get secret mysql-e2e-test-secrets -n $NAMESPACE -o jsonpath='{.data.root}' | base64 -d)
+      kubectl run mysql-client --namespace $NAMESPACE --image=mysql:8.0 --restart=Never --env="MYSQL_PWD=$MYSQL_PWD" --command -- mysql -h mysql-e2e-test -u root -e "SELECT 1;"
+      kubectl wait --for=condition=Ready pod/mysql-client -n $NAMESPACE --timeout=300s
+      kubectl logs mysql-client -n $NAMESPACE

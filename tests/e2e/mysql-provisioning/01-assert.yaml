@@ -1,0 +1,12 @@
+# Assert: MySQLInstance claim is Ready
+apiVersion: database.example.org/v1alpha1
+kind: MySQLInstance
+metadata:
+  name: mysql-e2e-test
+status:
+  conditions:
+  - type: Synced
+    status: "True"
+  - type: Ready
+    status: "True"
+

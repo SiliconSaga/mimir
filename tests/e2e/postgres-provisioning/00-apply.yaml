@@ -1,0 +1,18 @@
+# Apply a PostgreSQL instance claim
+apiVersion: database.example.org/v1alpha1
+kind: PostgreSQLInstance
+metadata:
+  name: pg-e2e-test
+  labels:
+    mimir.siliconsaga.org/test: "true"
+spec:
+  parameters:
+    storageSize: 1Gi
+    version: "15"
+    replicas: 1
+    databaseName: testdb
+  compositionSelector:
+    matchLabels:
+      provider: percona
+      service: postgresql
+

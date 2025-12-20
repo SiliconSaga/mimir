@@ -1,0 +1,20 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestStep
+commands:
+  - script: |
+      set -e -o pipefail
+      sleep 5
+      echo "Waiting for secret mongo-e2e-test-secrets in ${NAMESPACE}..."
+      for i in $(seq 1 30); do
+        if kubectl get secret mongo-e2e-test-secrets -n $NAMESPACE >/dev/null 2>&1; then
+          echo "Secret found."
+          break
+        fi
+        echo "Secret not found yet, waiting..."
+        sleep 2
+      done
+      MONGO_USER=$(kubectl get secret mongo-e2e-test-secrets -n $NAMESPACE -o jsonpath='{.data.MONGODB_USER_ADMIN_USER}' | base64 -d)
+      MONGO_PASS=$(kubectl get secret mongo-e2e-test-secrets -n $NAMESPACE -o jsonpath='{.data.MONGODB_USER_ADMIN_PASSWORD}' | base64 -d)
+      kubectl run mongo-client --namespace $NAMESPACE --image=percona/percona-server-mongodb:6.0 --restart=Never --command -- mongosh "mongodb://${MONGO_USER}:${MONGO_PASS}@mongo-e2e-test:27017/admin?directConnection=true" --eval "db.runCommand({ ping: 1 })"
+      kubectl wait --for=condition=Ready pod/mongo-client -n $NAMESPACE --timeout=300s
+      kubectl logs mongo-client -n $NAMESPACE

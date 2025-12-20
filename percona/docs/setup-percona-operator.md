@@ -34,6 +34,14 @@ kubectl apply -f rbac.yaml
 kubectl apply --server-side -f https://raw.githubusercontent.com/percona/percona-postgresql-operator/v2.7.0/deploy/crd.yaml
 ```
 
+### Install RBAC (Required for Cluster-Wide Mode)
+
+Helm chart might not create ClusterRoles by default when upgrading or if not configured strictly. Apply our custom RBAC:
+
+```bash
+kubectl apply -f ../postgres-operator-rbac.yaml
+```
+
 ### Install Operator via Helm
 
 ```bash

@@ -1,0 +1,12 @@
+# Assert: MongoDBInstance claim is Ready
+apiVersion: database.example.org/v1alpha1
+kind: MongoDBInstance
+metadata:
+  name: mongo-e2e-test
+status:
+  conditions:
+  - type: Synced
+    status: "True"
+  - type: Ready
+    status: "True"
+
