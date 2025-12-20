@@ -1,11 +1,13 @@
-# Apply the ValkeyCluster claim
+# Apply a unique ValkeyCluster claim in the kuttl test namespace
+# kuttl auto-generates a unique namespace per test run
 apiVersion: mimir.siliconsaga.org/v1alpha1
 kind: ValkeyCluster
 metadata:
-  name: valkey-test
-  namespace: mimir
+  name: valkey-e2e-test
+  # No namespace specified - kuttl uses its generated test namespace
+  labels:
+    mimir.siliconsaga.org/test: "true"
 spec:
   parameters:
     replicas: 3
-    storageSize: "1Gi"
-
+    storageSize: "512Mi"  # Smaller for tests

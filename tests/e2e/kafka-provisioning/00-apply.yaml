@@ -1,12 +1,14 @@
-# Apply the KafkaCluster claim
+# Apply a unique KafkaCluster claim in the kuttl test namespace
+# kuttl auto-generates a unique namespace per test run
 apiVersion: mimir.siliconsaga.org/v1alpha1
 kind: KafkaCluster
 metadata:
-  name: kafka-test
-  namespace: mimir
+  name: kafka-e2e-test
+  # No namespace specified - kuttl uses its generated test namespace
+  labels:
+    mimir.siliconsaga.org/test: "true"
 spec:
   parameters:
-    replicas: 3
-    storageSize: "10Gi"
+    replicas: 1        # Minimal for faster tests
+    storageSize: "1Gi" # Smaller for tests
     version: "4.0.0"
-

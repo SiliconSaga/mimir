@@ -1,1 +1,21 @@
+# Kubeconfig files (may contain credentials)
+kubeconfig
+kubeconfig.yaml
+*.kubeconfig
+
+# kuttl test artifacts
+kuttl-test.yaml.bak
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
 .DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
