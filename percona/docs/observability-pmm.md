@@ -1,5 +1,9 @@
 # PMM (Percona Monitoring and Management) Setup
 
+> [!WARNING]
+> PMM integration is currently **DISABLED** and under development. The instructions below are for reference only.
+
+
 PMM provides comprehensive monitoring for your database clusters.
 
 ## Installation

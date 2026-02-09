@@ -2,6 +2,12 @@
 
 This directory contains configuration for running enterprise-grade databases using **Percona Operators** and **Crossplane** on Kubernetes.
 
+## Architecture
+
+*   **Crossplane**: Manages the abstraction and lifecycle of the database.
+*   **Percona PostgreSQL Operator**: Orchestrates the PostgreSQL clusters, handling high availability, backups, and updates.
+*   **Namespace Isolation**: Each database instance runs in its own namespace for security and resource isolation.
+
 ## Documentation
 
 ### 🚀 Getting Started
@@ -35,4 +41,7 @@ This directory contains configuration for running enterprise-grade databases usi
 *   `percona-mongo-cluster.yaml`: Reference CR for MongoDB.
 
 ## Future Work
-*   See [**TODO.md**](TODO.md) for planned improvements like Loki integration and XMySQL support.
+## Future Work & Known Issues
+*   **Loki Integration**: Currently disabled. Needs correct configuration for Loki 6.x and storage backends.
+*   **PMM MongoDB Integration**: Sidecar container for PMM is not injecting correctly; needs investigation.
+*   **XMySQL Support**: Planned support for `XMySQL` composite resoures.

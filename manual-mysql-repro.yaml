@@ -1,9 +1,0 @@
-apiVersion: database.example.org/v1alpha1
-kind: MySQLInstance
-metadata:
-  name: mysql-e2e-test
-  namespace: manual-mysql
-spec:
-  parameters:
-    storageSize: 1Gi
-    replicas: 3
