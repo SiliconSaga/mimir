@@ -15,6 +15,6 @@ commands:
       done
       MONGO_USER=$(kubectl get secret mongo-e2e-test-secrets -n $NAMESPACE -o jsonpath='{.data.MONGODB_USER_ADMIN_USER}' | base64 -d)
       MONGO_PASS=$(kubectl get secret mongo-e2e-test-secrets -n $NAMESPACE -o jsonpath='{.data.MONGODB_USER_ADMIN_PASSWORD}' | base64 -d)
-      kubectl run mongo-client --namespace $NAMESPACE --image=percona/percona-server-mongodb:6.0 --restart=Never --command -- mongosh "mongodb://${MONGO_USER}:${MONGO_PASS}@mongo-e2e-test:27017/admin?directConnection=true" --eval "db.runCommand({ ping: 1 })"
-      kubectl wait --for=condition=Ready pod/mongo-client -n $NAMESPACE --timeout=300s
+      kubectl run mongo-client --namespace $NAMESPACE --image=percona/percona-server-mongodb:6.0 --restart=Never --command -- sh -c "for i in \$(seq 1 12); do mongosh \"mongodb://${MONGO_USER}:${MONGO_PASS}@mongo-e2e-test:27017/admin?directConnection=true\" --eval \"db.runCommand({ ping: 1 })\" && exit 0; echo \"Retry \$i...\"; sleep 5; done; exit 1"
+      kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/mongo-client -n $NAMESPACE --timeout=120s
       kubectl logs mongo-client -n $NAMESPACE
