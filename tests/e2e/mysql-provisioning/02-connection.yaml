@@ -14,6 +14,6 @@ commands:
         sleep 2
       done
       MYSQL_PWD=$(kubectl get secret mysql-e2e-test-secrets -n $NAMESPACE -o jsonpath='{.data.root}' | base64 -d)
-      kubectl run mysql-client --namespace $NAMESPACE --image=mysql:8.0 --restart=Never --env="MYSQL_PWD=$MYSQL_PWD" --command -- mysql -h mysql-e2e-test -u root -e "SELECT 1;"
-      kubectl wait --for=condition=Ready pod/mysql-client -n $NAMESPACE --timeout=300s
+      kubectl run mysql-client --namespace $NAMESPACE --image=mysql:8.0 --restart=Never --env="MYSQL_PWD=$MYSQL_PWD" --command -- sh -c 'for i in $(seq 1 12); do mysql -h mysql-e2e-test -u root -e "SELECT 1;" && exit 0; echo "Retry $i..."; sleep 5; done; exit 1'
+      kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/mysql-client -n $NAMESPACE --timeout=120s
       kubectl logs mysql-client -n $NAMESPACE

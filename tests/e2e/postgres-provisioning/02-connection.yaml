@@ -14,6 +14,6 @@ commands:
         sleep 2
       done
       PGPASSWORD=$(kubectl get secret pg-e2e-test-user-secret -n $NAMESPACE -o jsonpath='{.data.password}' | base64 -d)
-      kubectl run pg-client --namespace $NAMESPACE --image=postgres:15 --restart=Never --env="PGPASSWORD=$PGPASSWORD" --command -- psql -h pg-e2e-test -U testdb -d testdb -c "SELECT 1;"
-      kubectl wait --for=condition=Ready pod/pg-client -n $NAMESPACE --timeout=300s
+      kubectl run pg-client --namespace $NAMESPACE --image=postgres:15 --restart=Never --env="PGPASSWORD=$PGPASSWORD" --command -- sh -c 'for i in $(seq 1 12); do psql -h pg-e2e-test -U testdb -d testdb -c "SELECT 1;" && exit 0; echo "Retry $i..."; sleep 5; done; exit 1'
+      kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/pg-client -n $NAMESPACE --timeout=120s
       kubectl logs pg-client -n $NAMESPACE
