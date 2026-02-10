@@ -178,11 +178,69 @@ kubectl kuttl test tests/e2e/
 
 Expected result: all 5 tests pass (Kafka, Valkey, PostgreSQL, MySQL, MongoDB). Full sequential run takes ~12 minutes.
 
+## Quick Start (New System)
+
+For a fresh system with k3d already installed:
+
+```bash
+k3d cluster create mimir-test --port "9080:80@loadbalancer" --port "9443:443@loadbalancer" --agents 2
+./setup.sh
+kubectl kuttl test tests/e2e/
+```
+
+The script is idempotent (`helm upgrade --install`, `--dry-run=client`). Use `--skip-crossplane` if Crossplane is managed by your infra repo.
+
 ## Teardown
 
 ```bash
 k3d cluster delete mimir-test
 ```
+
+## Argo CD Integration
+
+The setup has a natural ordering that maps to Argo CD sync waves:
+
+| Wave | Resources | Why |
+|------|-----------|-----|
+| 0 | Crossplane core (Helm) | Foundation |
+| 1 | `platform.yaml` (Providers, Functions) | Need Crossplane CRDs |
+| 2 | `provider-configs.yaml`, RBAC | Need provider CRDs registered |
+| 3 | Operator Helm releases (Strimzi, OT, Percona) | Need working Crossplane |
+| 4 | `percona/rbac.yaml` | Needs Percona CRDs |
+| 5 | XRDs and Compositions | Needs operators + Crossplane ready |
+
+### Recommended restructuring for Argo
+
+1. **App-of-Apps pattern**: One root Application pointing to a directory of Application manifests.
+2. **Each wave = one Application** with `argocd.argoproj.io/sync-wave` annotations.
+3. **Operators via Helm**: Argo natively supports `kind: Application` with `source.helm` — no need for a setup script.
+4. **Health checks**: Argo already understands Crossplane health for Providers/Functions. For Percona CRDs, you may need custom health checks or just rely on sync-wave ordering.
+5. **Move `crossplane-rbac.yaml` into this repo** rather than referencing `../refr-k8s/` (Argo needs self-contained repos).
+
+Example Application for Percona operators:
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: mimir-percona-operators
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  source:
+    repoURL: https://percona.github.io/percona-helm-charts/
+    chart: pg-operator
+    targetRevision: "*"
+    helm:
+      values: |
+        watchAllNamespaces: true
+  destination:
+    namespace: percona-system
+```
+
+### Key gotcha for Argo
+
+The `provider-configs.yaml` will fail if applied before provider CRDs exist. In Argo, this means wave 2 must not sync until wave 1 providers report Healthy. Use `argocd.argoproj.io/sync-wave` plus a `SyncPolicy` with `retry` to handle the ordering, or split into separate Applications with explicit dependencies.
 
 ## Troubleshooting
 
