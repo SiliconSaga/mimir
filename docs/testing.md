@@ -26,6 +26,8 @@ The common thread is **BDD-style scenarios** defined in Gherkin (`.feature` file
 
 ### Installation
 
+TODO: Upgrade to a newer version. 0.15 is old
+
 #### macOS (local development)
 
 ```bash
@@ -49,14 +51,23 @@ kuttl version
 
 #### Windows
 
-```powershell
-# Download Windows binary
-$KUTTL_VERSION = "0.15.0"
-Invoke-WebRequest -Uri "https://github.com/kudobuilder/kuttl/releases/download/v$KUTTL_VERSION/kubectl-kuttl_${KUTTL_VERSION}_windows_x86_64.exe" -OutFile kuttl.exe
+Since native Windows binaries are not available for recent Kuttl versions, we use a Docker-based approach wrapped in a PowerShell script.
 
-# Add to PATH or move to a directory in PATH
-Move-Item kuttl.exe C:\tools\kuttl.exe
+1. Ensure Docker Desktop or Rancher Desktop is running.
+2. Run the provided helper script:
+
+```powershell
+# Run all tests
+.\test.ps1
+
+# Run specific test
+.\test.ps1 --test kafka-provisioning
 ```
+
+The script automatically:
+- Creates a temporary kubeconfig compatible with Docker networking
+- Mounts the current repository into the Kuttl container
+- Executes tests against your local cluster (using `host.docker.internal`)
 
 #### Container-based (Jenkins/CI)
 
