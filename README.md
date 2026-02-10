@@ -41,10 +41,12 @@ kubectl kuttl test tests/e2e/ --test kafka-provisioning
 
 | Component | Test | Provisioning Time |
 |-----------|------|-------------------|
-| Kafka (Strimzi) | `kafka-provisioning` | ~65s |
-| Valkey (OT-Container-Kit) | `valkey-provisioning` | ~38s |
-| PostgreSQL (Percona) | `postgres-provisioning` | ~2-3min |
-| MySQL (Percona) | `mysql-provisioning` | ~2-3min |
-| MongoDB (Percona) | `mongodb-provisioning` | ~2-3min |
+| Kafka (Strimzi) | `kafka-provisioning` | ~70s |
+| Valkey (OT-Container-Kit) | `valkey-provisioning` | ~40s |
+| PostgreSQL (Percona) | `postgres-provisioning` | ~150s |
+| MySQL (Percona) | `mysql-provisioning` | ~330s |
+| MongoDB (Percona) | `mongodb-provisioning` | ~140s |
+
+> Tests run sequentially (`parallel: 1`). Full suite takes ~12 minutes on a 3-node k3d cluster. Timings measured on a fresh cluster with images pre-pulled for most components.
 
 See [**Testing Strategy**](./docs/testing.md) for details on the testing approach and how it fits within the broader ecosystem.

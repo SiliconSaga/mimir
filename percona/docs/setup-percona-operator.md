@@ -49,9 +49,11 @@ helm repo add percona https://percona.github.io/percona-helm-charts/
 helm repo update
 helm install percona-postgresql-operator \
   --namespace percona-system \
-  --set watchNamespace="" \
+  --set watchAllNamespaces=true \
   percona/pg-operator
 ```
+
+> **Warning**: Do NOT use `--set watchNamespace=""` — passing an empty string via `--set` is silently ignored by Helm, causing the operator to only watch its own namespace. Use `--set watchAllNamespaces=true` instead.
 
 ## 3. Install Percona MongoDB Operator
 
@@ -73,12 +75,20 @@ helm install pxc-operator \
 
 ## Verification
 
-Check that operators are running:
+Check that all operators are running in the shared namespace:
 
 ```bash
-# PostgreSQL Operator
-kubectl logs -n pgo -l app.kubernetes.io/name=postgresql-operator
+kubectl get pods -n percona-system
 
-# MongoDB Operator
-kubectl logs -n psmdb -l app.kubernetes.io/name=psmdb-operator
+# Check individual operator logs
+kubectl logs -n percona-system -l app.kubernetes.io/name=pg-operator
+kubectl logs -n percona-system -l app.kubernetes.io/name=psmdb-operator
+kubectl logs -n percona-system -l app.kubernetes.io/name=pxc-operator
+```
+
+Verify operators are watching all namespaces (critical for Crossplane-managed claims):
+
+```bash
+# Should show WATCH_NAMESPACE is empty or watchAllNamespaces is true
+kubectl get deployment -n percona-system -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{range .spec.template.spec.containers[*]}{range .env[*]}{.name}={.value}{" "}{end}{end}{"\n"}{end}'
 ```

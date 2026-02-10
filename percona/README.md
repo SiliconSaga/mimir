@@ -40,8 +40,7 @@ This directory contains configuration for running enterprise-grade databases usi
 *   `percona-postgres-cluster.yaml`: Reference CR for PostgreSQL.
 *   `percona-mongo-cluster.yaml`: Reference CR for MongoDB.
 
-## Future Work
-## Future Work & Known Issues
+## Known Issues & Future Work
 *   **Loki Integration**: Currently disabled. Needs correct configuration for Loki 6.x and storage backends.
 *   **PMM MongoDB Integration**: Sidecar container for PMM is not injecting correctly; needs investigation.
-*   **XMySQL Support**: Planned support for `XMySQL` composite resoures.
+*   **XRD v1 Deprecation**: Current XRDs use `CompositeResourceDefinition v1`, which is deprecated. Migrate to v2 in a future release.
