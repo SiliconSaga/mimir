@@ -105,6 +105,12 @@ helm upgrade --install percona-postgresql-operator percona/pg-operator \
   --set watchAllNamespaces=true \
   --version 2.8.2
 
+echo "  Patching percona-postgresql-operator for runAsNonRoot issue..."
+kubectl patch deployment percona-postgresql-operator-pg-operator \
+  -n percona-system \
+  --type strategic \
+  --patch '{"spec": {"template": {"spec": {"containers": [{"name":"operator","securityContext":{"runAsNonRoot":false}}]}}}}'
+
 helm upgrade --install psmdb-operator percona/psmdb-operator \
   --namespace percona-system \
   --set watchAllNamespaces=true \
@@ -137,3 +143,4 @@ kubectl wait --for=condition=Established xrd --all --timeout=60s
 echo ""
 echo "=== Setup complete ==="
 echo "Run tests:  kubectl kuttl test tests/e2e/"
+echo "Or if on Windows: ./test.ps1 (uses a Docker wrapper for kuttl)"

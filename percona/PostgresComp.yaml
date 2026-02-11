@@ -61,6 +61,10 @@ spec:
                         requests:
                           storage: {{ .observed.composite.resource.spec.parameters.storageSize }}
                       storageClassName: local-path
+                    initContainer:
+                      image: percona/percona-postgresql-operator:2.7.0
+                      containerSecurityContext:
+                        runAsNonRoot: false
                   backups:
                     enabled: true
                     pgbackrest:

@@ -38,8 +38,9 @@ foreach ($arg in $args) {
         # Check if it's a known test suite name
         $PotentialTestPath = Join-Path $TestDir $arg
         if (Test-Path $PotentialTestPath) {
-            Write-Host "  Auto-detecting test suite: $arg -> tests/e2e/$arg" -ForegroundColor Yellow
-            $DockerArgs += "tests/e2e/$arg"
+            Write-Host "  Auto-detecting test suite: $arg -> --test $arg" -ForegroundColor Yellow
+            $DockerArgs += "--test"
+            $DockerArgs += $arg
             continue
         }
         
@@ -60,7 +61,7 @@ docker run --rm `
     --add-host host.docker.internal:host-gateway `
     --entrypoint /bin/sh `
     kudobuilder/kuttl:latest `
-    -c "mkdir -p /tmp/work && cp /workspace/kuttl-test.yaml /tmp/work/ && ln -s /workspace/tests /tmp/work/tests && ln -s /workspace/features /tmp/work/features && ln -s /usr/bin/kubectl /tmp/work/kubectl && cd /tmp/work && kubectl-kuttl test tests/e2e --config kuttl-test.yaml $DockerArgs"
+    -c "mkdir -p /tmp/work && cp /workspace/kuttl-test.yaml /tmp/work/ && ln -s /workspace/tests /tmp/work/tests && ln -s /workspace/features /tmp/work/features && ln -s /usr/bin/kubectl /tmp/work/kubectl && cd /tmp/work && kubectl-kuttl test --config kuttl-test.yaml $DockerArgs"
 
 # Cleanup (optional, as temp path cleans up eventually, but polite to do so)
 Remove-Item -Path $TempKubeConfig -ErrorAction SilentlyContinue

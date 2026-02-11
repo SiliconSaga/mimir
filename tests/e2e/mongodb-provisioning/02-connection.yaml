@@ -2,7 +2,7 @@ apiVersion: kuttl.dev/v1beta1
 kind: TestStep
 commands:
   - script: |
-      set -e -o pipefail
+      set -e
       sleep 5
       echo "Waiting for secret mongo-e2e-test-secrets in ${NAMESPACE}..."
       for i in $(seq 1 30); do
@@ -16,5 +16,20 @@ commands:
       MONGO_USER=$(kubectl get secret mongo-e2e-test-secrets -n $NAMESPACE -o jsonpath='{.data.MONGODB_USER_ADMIN_USER}' | base64 -d)
       MONGO_PASS=$(kubectl get secret mongo-e2e-test-secrets -n $NAMESPACE -o jsonpath='{.data.MONGODB_USER_ADMIN_PASSWORD}' | base64 -d)
       kubectl run mongo-client --namespace $NAMESPACE --image=percona/percona-server-mongodb:6.0 --restart=Never --command -- sh -c "for i in \$(seq 1 12); do mongosh \"mongodb://${MONGO_USER}:${MONGO_PASS}@mongo-e2e-test:27017/admin?directConnection=true\" --eval \"db.runCommand({ ping: 1 })\" && exit 0; echo \"Retry \$i...\"; sleep 5; done; exit 1"
-      kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/mongo-client -n $NAMESPACE --timeout=120s
+      # kubectl wait --for=jsonpath='{.status.phase}'=Succeeded is not supported in some versions/environments
+      echo "Waiting for pod/mongo-client to succeed..."
+      for i in $(seq 1 60); do
+        PHASE=$(kubectl get pod mongo-client -n $NAMESPACE -o jsonpath='{.status.phase}')
+        if [ "$PHASE" = "Succeeded" ]; then
+          echo "Pod succeeded."
+          break
+        fi
+        if [ "$PHASE" = "Failed" ]; then
+          echo "Pod failed."
+          kubectl logs mongo-client -n $NAMESPACE
+          exit 1
+        fi
+        echo "Pod phase: $PHASE. Waiting..."
+        sleep 2
+      done
       kubectl logs mongo-client -n $NAMESPACE

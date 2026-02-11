@@ -2,7 +2,7 @@ apiVersion: kuttl.dev/v1beta1
 kind: TestStep
 commands:
   - script: |
-      set -e -o pipefail
+      set -e
       sleep 5
       echo "Waiting for secret pg-e2e-test-user-secret in ${NAMESPACE}..."
       for i in $(seq 1 30); do
@@ -15,5 +15,20 @@ commands:
       done
       PGPASSWORD=$(kubectl get secret pg-e2e-test-user-secret -n $NAMESPACE -o jsonpath='{.data.password}' | base64 -d)
       kubectl run pg-client --namespace $NAMESPACE --image=postgres:15 --restart=Never --env="PGPASSWORD=$PGPASSWORD" --command -- sh -c 'for i in $(seq 1 12); do psql -h pg-e2e-test -U testdb -d testdb -c "SELECT 1;" && exit 0; echo "Retry $i..."; sleep 5; done; exit 1'
-      kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/pg-client -n $NAMESPACE --timeout=120s
+      # kubectl wait --for=jsonpath='{.status.phase}'=Succeeded is not supported in some versions/environments
+      echo "Waiting for pod/pg-client to succeed..."
+      for i in $(seq 1 60); do
+        PHASE=$(kubectl get pod pg-client -n $NAMESPACE -o jsonpath='{.status.phase}')
+        if [ "$PHASE" = "Succeeded" ]; then
+          echo "Pod succeeded."
+          break
+        fi
+        if [ "$PHASE" = "Failed" ]; then
+          echo "Pod failed."
+          kubectl logs pg-client -n $NAMESPACE
+          exit 1
+        fi
+        echo "Pod phase: $PHASE. Waiting..."
+        sleep 2
+      done
       kubectl logs pg-client -n $NAMESPACE
