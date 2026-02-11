@@ -29,7 +29,7 @@ if [ "$SKIP_CROSSPLANE" = false ]; then
   helm repo add crossplane-stable https://charts.crossplane.io/stable 2>/dev/null
   helm repo update >/dev/null
   helm upgrade --install crossplane crossplane-stable/crossplane \
-    --namespace crossplane-system --create-namespace --wait
+    --namespace crossplane-system --create-namespace --wait --version 2.1.4
 
   echo "=== Crossplane Providers & Functions ==="
   kubectl apply -f platform.yaml
@@ -39,7 +39,7 @@ kind: Provider
 metadata:
   name: provider-helm
 spec:
-  package: xpkg.upbound.io/crossplane-contrib/provider-helm:v0.19.0
+  package: xpkg.upbound.io/crossplane-contrib/provider-helm:v0.18.0
 ---
 apiVersion: pkg.crossplane.io/v1beta1
 kind: Function
@@ -53,7 +53,7 @@ kind: Function
 metadata:
   name: function-go-templating
 spec:
-  package: xpkg.upbound.io/crossplane-contrib/function-go-templating:v0.7.0
+  package: xpkg.upbound.io/crossplane-contrib/function-go-templating:v0.4.0
 EOF
 
   # CRITICAL: ProviderConfigs need CRDs to exist first
@@ -80,7 +80,8 @@ helm repo add strimzi https://strimzi.io/charts/ 2>/dev/null
 helm repo update >/dev/null
 helm upgrade --install strimzi-kafka-operator strimzi/strimzi-kafka-operator \
   --namespace kafka-system \
-  --set watchAnyNamespace=true
+  --set watchAnyNamespace=true \
+  --version 0.50.0
 wait_rollout strimzi-cluster-operator kafka-system
 
 echo "=== Valkey (OT-Container-Kit) ==="
@@ -88,7 +89,8 @@ kubectl create ns valkey-system --dry-run=client -o yaml | kubectl apply -f -
 helm repo add ot-helm https://ot-container-kit.github.io/helm-charts/ 2>/dev/null
 helm repo update >/dev/null
 helm upgrade --install redis-operator ot-helm/redis-operator \
-  --namespace valkey-system
+  --namespace valkey-system \
+  --version 0.23.0
 wait_rollout redis-operator valkey-system
 
 echo "=== Percona Operators (PostgreSQL, MongoDB, MySQL) ==="
@@ -100,15 +102,18 @@ helm repo update >/dev/null
 # Helm --set silently ignores empty strings, causing the operator to only watch its own namespace.
 helm upgrade --install percona-postgresql-operator percona/pg-operator \
   --namespace percona-system \
-  --set watchAllNamespaces=true
+  --set watchAllNamespaces=true \
+  --version 2.8.2
 
 helm upgrade --install psmdb-operator percona/psmdb-operator \
   --namespace percona-system \
-  --set watchAllNamespaces=true
+  --set watchAllNamespaces=true \
+  --version 1.21.3
 
 helm upgrade --install pxc-operator percona/pxc-operator \
   --namespace percona-system \
-  --set watchAllNamespaces=true
+  --set watchAllNamespaces=true \
+  --version 1.19.0
 
 echo "  Waiting for all Percona operators..."
 wait_rollout percona-postgresql-operator-pg-operator percona-system

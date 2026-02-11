@@ -8,6 +8,6 @@ metadata:
 spec:
   parameters:
     storageSize: 1Gi
-    version: "6.0.24-19"
+    version: "6.0.27-21"
     replicas: 1
 

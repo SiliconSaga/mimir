@@ -40,12 +40,12 @@ spec:
                   annotations:
                     crossplane.io/external-name: {{ .observed.composite.resource.metadata.name }}
                 spec:
-                  crVersion: 1.13.0
+                  crVersion: 1.19.0
                   allowUnsafeConfigurations: true
                   secretsName: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-name" | default .observed.composite.resource.metadata.name }}-secrets
                   pxc:
                     size: {{ .observed.composite.resource.spec.parameters.replicas }}
-                    image: percona/percona-xtradb-cluster:8.0.32-24.2
+                    image: percona/percona-xtradb-cluster:8.0.44-35.1
                     volumeSpec:
                       persistentVolumeClaim:
                         resources:
@@ -55,7 +55,7 @@ spec:
                   haproxy:
                     enabled: true
                     size: {{ .observed.composite.resource.spec.parameters.replicas }}
-                    image: percona/percona-xtradb-cluster-operator:1.13.0-haproxy
+                    image: percona/haproxy:2.8.17
                     resources:
                       requests:
                         memory: "256Mi"
