@@ -2,13 +2,15 @@
 # Mimir Data Services Setup
 # Installs all operators, Crossplane resources, and data service definitions.
 # Assumes: Crossplane is already installed (from infra repo), kubectl context is set.
-# Run: ./setup.sh [--skip-crossplane]
+# Run: ./setup.sh [--skip-crossplane] [--patch-security-context]
 set -euo pipefail
 
 SKIP_CROSSPLANE=false
+PATCH_SECURITY_CONTEXT=false
 for arg in "$@"; do
   case $arg in
     --skip-crossplane) SKIP_CROSSPLANE=true ;;
+    --patch-security-context) PATCH_SECURITY_CONTEXT=true ;;
   esac
 done
 
@@ -105,11 +107,17 @@ helm upgrade --install percona-postgresql-operator percona/pg-operator \
   --set watchAllNamespaces=true \
   --version 2.8.2
 
-echo "  Patching percona-postgresql-operator for runAsNonRoot issue..."
-kubectl patch deployment percona-postgresql-operator-pg-operator \
-  -n percona-system \
-  --type strategic \
-  --patch '{"spec": {"template": {"spec": {"containers": [{"name":"operator","securityContext":{"runAsNonRoot":false}}]}}}}'
+# The pg-operator chart hardcodes runAsNonRoot: true with no values.yaml override.
+# This causes CreateContainerConfigError on Rancher Desktop (and possibly GKE with strict
+# Pod Security Standards). Not needed on k3d. The chart would need a Kustomize post-renderer
+# or upstream fix to work declaratively with Argo CD. See docs/cluster-setup.md for options.
+if [ "$PATCH_SECURITY_CONTEXT" = true ]; then
+  echo "  Patching percona-postgresql-operator for runAsNonRoot issue..."
+  kubectl patch deployment percona-postgresql-operator-pg-operator \
+    -n percona-system \
+    --type strategic \
+    --patch '{"spec": {"template": {"spec": {"containers": [{"name":"operator","securityContext":{"runAsNonRoot":false}}]}}}}'
+fi
 
 helm upgrade --install psmdb-operator percona/psmdb-operator \
   --namespace percona-system \

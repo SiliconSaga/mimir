@@ -188,7 +188,9 @@ k3d cluster create mimir-test --port "9080:80@loadbalancer" --port "9443:443@loa
 kubectl kuttl test tests/e2e/
 ```
 
-The script is idempotent (`helm upgrade --install`, `--dry-run=client`). Use `--skip-crossplane` if Crossplane is managed by your infra repo.
+The script is idempotent (`helm upgrade --install`, `--dry-run=client`). Flags:
+- `--skip-crossplane` — if Crossplane is managed by your infra repo
+- `--patch-security-context` — needed on Rancher Desktop (patches PG operator `runAsNonRoot`; not needed on k3d)
 
 ## Teardown
 
@@ -242,6 +244,23 @@ spec:
 
 The `provider-configs.yaml` will fail if applied before provider CRDs exist. In Argo, this means wave 2 must not sync until wave 1 providers report Healthy. Use `argocd.argoproj.io/sync-wave` plus a `SyncPolicy` with `retry` to handle the ordering, or split into separate Applications with explicit dependencies.
 
+### Percona PG operator `runAsNonRoot` issue
+
+The pg-operator Helm chart (2.8.2) hardcodes `runAsNonRoot: true` in the operator deployment's container securityContext with **no values.yaml override**. This causes `CreateContainerConfigError` on environments that enforce this strictly (confirmed on Rancher Desktop, may affect GKE with Pod Security Standards).
+
+Note: This is the **operator deployment itself**, not the workload pods. The workload-level fix is in `PostgresComp.yaml` (`initContainer.containerSecurityContext.runAsNonRoot: false`) and works declaratively. The operator deployment patch is the problematic part.
+
+Not needed on k3d. The setup script supports `--patch-security-context` for environments that need it. For Argo CD, the imperative `kubectl patch` will be reverted on each sync. Options:
+
+| Approach | Argo-compatible | Complexity |
+|----------|----------------|------------|
+| **Kustomize post-renderer** on the Helm Application | Yes | Medium — add a `kustomization.yaml` with a strategic merge patch |
+| **PR to Percona** to expose `containerSecurityContext` as a Helm value | Yes (once merged) | Low, but depends on upstream acceptance |
+| **Argo post-sync resource hook** (Job that runs `kubectl patch`) | Partially — runs after each sync | Fragile, races with rollout |
+| **Skip it** (if GKE doesn't need it) | Yes | None — test on GKE first |
+
+Recommended: test on GKE without the patch first. If needed, a Kustomize post-renderer is the cleanest Argo-native solution.
+
 ## Troubleshooting
 
 ### PostgreSQL claim stays "Synced but not Ready"
@@ -264,6 +283,17 @@ helm upgrade percona-postgresql-operator percona/pg-operator \
 ### CEL readiness error: "no such key: status"
 
 This happens when a Crossplane Object's CEL readiness query (e.g., `object.status.state == 'ready'`) runs before the operator has written any status. It resolves itself once the operator starts reconciling. If it persists, the operator likely isn't watching the namespace (see above).
+
+### Percona PG operator: `CreateContainerConfigError` / `runAsNonRoot`
+
+The operator pod fails to start with `container has runAsNonRoot and image will run as root`. This happens on Rancher Desktop and potentially GKE with strict Pod Security Standards. Not observed on k3d.
+
+Two separate fixes may be needed:
+
+1. **Operator deployment** (the operator pod itself): `./setup.sh --patch-security-context`
+2. **Workload init containers** (PG cluster pods): Already handled in `PostgresComp.yaml` via `initContainer.containerSecurityContext.runAsNonRoot: false`
+
+The operator patch is imperative and incompatible with Argo CD. See the "Argo CD Integration" section for alternatives.
 
 ### provider-configs.yaml fails on apply
 
