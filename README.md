@@ -21,6 +21,18 @@ Enterprise-grade SQL and NoSQL databases powered by **Percona Operators**.
 - **Supported**: PostgreSQL, MySQL (XtraDB), MongoDB.
 - **Use Case**: Primary relational or document storage.
 
+## Quick Start
+
+For a fresh system with k3d already installed:
+
+```bash
+k3d cluster create mimir-test --port "9080:80@loadbalancer" --port "9443:443@loadbalancer" --agents 2
+./setup.sh
+kubectl kuttl test tests/e2e/
+```
+
+The script is idempotent (`helm upgrade --install`, `--dry-run=client`). Use `--skip-crossplane` if Crossplane is managed by your infra repo.
+
 ## Usage
 
 To interact with Mimir services, ensure you have the appropriate `Claim` definitions in your namespace.

@@ -38,9 +38,8 @@ foreach ($arg in $args) {
         # Check if it's a known test suite name
         $PotentialTestPath = Join-Path $TestDir $arg
         if (Test-Path $PotentialTestPath) {
-            Write-Host "  Auto-detecting test suite: $arg -> --test $arg" -ForegroundColor Yellow
-            $DockerArgs += "--test"
-            $DockerArgs += $arg
+            Write-Host "  Auto-detecting test suite: $arg -> tests/e2e/$arg" -ForegroundColor Yellow
+            $DockerArgs += "tests/e2e/$arg"
             continue
         }
         
