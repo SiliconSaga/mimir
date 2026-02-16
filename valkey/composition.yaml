@@ -35,7 +35,7 @@ spec:
                 kind: RedisCluster
                 metadata:
                   name: {{ .observed.composite.resource.metadata.name }}
-                  namespace: valkey-system
+                  namespace: valkey
                 spec:
                   clusterSize: {{ .observed.composite.resource.spec.parameters.replicas }}
                   kubernetesConfig:

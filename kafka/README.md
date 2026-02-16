@@ -56,13 +56,13 @@ To verify the service works:
 
 3. **Connection Details**:
 
-   The bootstrap server address follows the pattern: `<composite-name>-kafka-bootstrap.kafka-system.svc:9092`
+   The bootstrap server address follows the pattern: `<composite-name>-kafka-bootstrap.kafka.svc:9092`
 
    Get the bootstrap server:
 
    ```bash
    COMPOSITE_NAME=$(kubectl get kafkacluster kafka-test -n mimir -o jsonpath='{.spec.resourceRef.name}')
-   KAFKA_BOOTSTRAP="${COMPOSITE_NAME}-kafka-bootstrap.kafka-system.svc:9092"
+   KAFKA_BOOTSTRAP="${COMPOSITE_NAME}-kafka-bootstrap.kafka.svc:9092"
    echo $KAFKA_BOOTSTRAP
    ```
 
@@ -73,18 +73,18 @@ To verify connectivity, exec into one of the Kafka broker pods:
 ```bash
 # Get composite name and broker pod (run all 3 lines)
 COMPOSITE_NAME=$(kubectl get kafkacluster kafka-test -n mimir -o jsonpath='{.spec.resourceRef.name}')
-KAFKA_POD=$(kubectl get pods -n kafka-system -l strimzi.io/cluster=$COMPOSITE_NAME,strimzi.io/broker-role=true -o jsonpath='{.items[0].metadata.name}')
+KAFKA_POD=$(kubectl get pods -n kafka -l strimzi.io/cluster=$COMPOSITE_NAME,strimzi.io/broker-role=true -o jsonpath='{.items[0].metadata.name}')
 echo "Using pod: $KAFKA_POD"
 
 # List topics
-kubectl exec -n kafka-system $KAFKA_POD -- \
+kubectl exec -n kafka $KAFKA_POD -- \
   /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list
 ```
 
 Create a test topic:
 
 ```bash
-kubectl exec -n kafka-system $KAFKA_POD -- \
+kubectl exec -n kafka $KAFKA_POD -- \
   /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 \
   --create --topic test-topic2 --partitions 3 --replication-factor 2
 ```
@@ -104,7 +104,7 @@ kubectl exec -n kafka-system $KAFKA_POD -- \
 External projects (like `Heimdall` or application projects) should treat this as a dependency.
 
 1. **Define Dependency**: In your project's Helm chart or configuration, reference the expected bootstrap URL pattern.
-2. **Network Policies**: Ensure your namespace allows egress to `kafka-system`.
+2. **Network Policies**: Ensure your namespace allows egress to `kafka`.
 3. **Topics**: Use the Strimzi `KafkaTopic` CRD to create topics (managed by the Entity Operator).
 
 ### Creating Topics
@@ -114,7 +114,7 @@ apiVersion: kafka.strimzi.io/v1beta2
 kind: KafkaTopic
 metadata:
   name: my-topic
-  namespace: kafka-system
+  namespace: kafka
   labels:
     strimzi.io/cluster: <kafka-cluster-name>
 spec:

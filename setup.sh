@@ -5,6 +5,9 @@
 # Run: ./setup.sh [--skip-crossplane] [--patch-security-context]
 set -euo pipefail
 
+# Ensure we run from the repo root regardless of where the script is invoked
+cd "$(dirname "$0")"
+
 SKIP_CROSSPLANE=false
 PATCH_SECURITY_CONTEXT=false
 for arg in "$@"; do
@@ -41,7 +44,7 @@ kind: Provider
 metadata:
   name: provider-helm
 spec:
-  package: xpkg.upbound.io/crossplane-contrib/provider-helm:v0.18.0
+  package: xpkg.upbound.io/crossplane-contrib/provider-helm:v1.0.0
 ---
 apiVersion: pkg.crossplane.io/v1beta1
 kind: Function
@@ -64,46 +67,64 @@ EOF
 
   echo "=== Provider Configs ==="
   kubectl apply -f provider-configs.yaml
-fi
 
-# ---------- Namespace RBAC ----------
-echo "=== Crossplane RBAC ==="
-# Apply if the file exists (may live in infra repo instead)
-if [ -f ../refr-k8s/crossplane-rbac.yaml ]; then
-  kubectl apply -f ../refr-k8s/crossplane-rbac.yaml
-else
-  echo "  Skipping crossplane-rbac.yaml (not found at ../refr-k8s/)"
+  echo "=== Crossplane Namespace RBAC ==="
+  # Allow Crossplane core SA to manage namespaces (for XR-created namespaces).
+  # When running atop Nordri (--skip-crossplane), this is provided by Nordri's crossplane-configs.yaml.
+  kubectl apply -f - <<'RBAC'
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: crossplane-namespace-manager
+rules:
+- apiGroups: [""]
+  resources: ["namespaces"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: crossplane-namespace-manager
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: crossplane-namespace-manager
+subjects:
+- kind: ServiceAccount
+  name: crossplane
+  namespace: crossplane-system
+RBAC
 fi
 
 # ---------- Operators ----------
 echo "=== Kafka (Strimzi) ==="
-kubectl create ns kafka-system --dry-run=client -o yaml | kubectl apply -f -
+kubectl create ns kafka --dry-run=client -o yaml | kubectl apply -f -
 helm repo add strimzi https://strimzi.io/charts/ 2>/dev/null
 helm repo update >/dev/null
 helm upgrade --install strimzi-kafka-operator strimzi/strimzi-kafka-operator \
-  --namespace kafka-system \
+  --namespace kafka \
   --set watchAnyNamespace=true \
   --version 0.50.0
-wait_rollout strimzi-cluster-operator kafka-system
+wait_rollout strimzi-cluster-operator kafka
 
 echo "=== Valkey (OT-Container-Kit) ==="
-kubectl create ns valkey-system --dry-run=client -o yaml | kubectl apply -f -
+kubectl create ns valkey --dry-run=client -o yaml | kubectl apply -f -
 helm repo add ot-helm https://ot-container-kit.github.io/helm-charts/ 2>/dev/null
 helm repo update >/dev/null
 helm upgrade --install redis-operator ot-helm/redis-operator \
-  --namespace valkey-system \
+  --namespace valkey \
   --version 0.23.0
-wait_rollout redis-operator valkey-system
+wait_rollout redis-operator valkey
 
 echo "=== Percona Operators (PostgreSQL, MongoDB, MySQL) ==="
-kubectl create ns percona-system --dry-run=client -o yaml | kubectl apply -f -
+kubectl create ns percona --dry-run=client -o yaml | kubectl apply -f -
 helm repo add percona https://percona.github.io/percona-helm-charts/ 2>/dev/null
 helm repo update >/dev/null
 
 # CRITICAL: Use --set watchAllNamespaces=true (NOT --set watchNamespace="")
 # Helm --set silently ignores empty strings, causing the operator to only watch its own namespace.
 helm upgrade --install percona-postgresql-operator percona/pg-operator \
-  --namespace percona-system \
+  --namespace percona \
   --set watchAllNamespaces=true \
   --version 2.8.2
 
@@ -114,25 +135,25 @@ helm upgrade --install percona-postgresql-operator percona/pg-operator \
 if [ "$PATCH_SECURITY_CONTEXT" = true ]; then
   echo "  Patching percona-postgresql-operator for runAsNonRoot issue..."
   kubectl patch deployment percona-postgresql-operator-pg-operator \
-    -n percona-system \
+    -n percona \
     --type strategic \
     --patch '{"spec": {"template": {"spec": {"containers": [{"name":"operator","securityContext":{"runAsNonRoot":false}}]}}}}'
 fi
 
 helm upgrade --install psmdb-operator percona/psmdb-operator \
-  --namespace percona-system \
+  --namespace percona \
   --set watchAllNamespaces=true \
   --version 1.21.3
 
 helm upgrade --install pxc-operator percona/pxc-operator \
-  --namespace percona-system \
+  --namespace percona \
   --set watchAllNamespaces=true \
   --version 1.19.0
 
 echo "  Waiting for all Percona operators..."
-wait_rollout percona-postgresql-operator-pg-operator percona-system
-wait_rollout psmdb-operator percona-system
-wait_rollout pxc-operator percona-system
+wait_rollout percona-postgresql-operator-pg-operator percona
+wait_rollout psmdb-operator percona
+wait_rollout pxc-operator percona
 
 echo "=== Percona RBAC ==="
 kubectl apply -f percona/rbac.yaml

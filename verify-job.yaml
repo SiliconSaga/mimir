@@ -8,6 +8,6 @@ spec:
       containers:
       - name: verify
         image: valkey/valkey:8.0
-        command: ["sh", "-c", "valkey-cli -h valkey-test-valkey-leader.valkey-system.svc -p 6379 ping | grep PONG"]
+        command: ["sh", "-c", "valkey-cli -h valkey-test-valkey-leader.valkey.svc -p 6379 ping | grep PONG"]
       restartPolicy: Never
   backoffLimit: 1

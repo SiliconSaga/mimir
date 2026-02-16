@@ -31,7 +31,7 @@ To verify the service works:
     Get the Hostname:
     ```bash
     COMPOSITE_NAME=$(kubectl get valkeycluster valkey-test -n mimir -o jsonpath='{.spec.resourceRef.name}')
-    VALKEY_HOST="${COMPOSITE_NAME}-leader.valkey-system.svc"
+    VALKEY_HOST="${COMPOSITE_NAME}-leader.valkey.svc"
     echo $VALKEY_HOST
     ```
     - Port: `6379`
@@ -50,4 +50,4 @@ kubectl run valkey-client --rm -i --restart=Never --image valkey/valkey:8.0 -- \
 External projects (like `Heimdall` or `AppProject`) should treat this as a dependency.
 
 1.  **Define Dependency**: In your project's Helm chart or wiring, reference the expected Host URL pattern.
-2.  **Network Policies**: Ensure your namespace allows egress to `valkey-system`.
+2.  **Network Policies**: Ensure your namespace allows egress to `valkey`.

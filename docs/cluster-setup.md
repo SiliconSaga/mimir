@@ -50,7 +50,7 @@ kind: Provider
 metadata:
   name: provider-helm
 spec:
-  package: xpkg.upbound.io/crossplane-contrib/provider-helm:v0.19.0
+  package: xpkg.upbound.io/crossplane-contrib/provider-helm:v1.0.0
 ---
 apiVersion: pkg.crossplane.io/v1beta1
 kind: Function
@@ -64,7 +64,7 @@ kind: Function
 metadata:
   name: function-go-templating
 spec:
-  package: xpkg.upbound.io/crossplane-contrib/function-go-templating:v0.7.0
+  package: xpkg.upbound.io/crossplane-contrib/function-go-templating:v0.4.0
 EOF
 ```
 
@@ -81,8 +81,9 @@ kubectl wait --for=condition=Healthy functions.pkg.crossplane.io --all --timeout
 
 ```bash
 kubectl apply -f provider-configs.yaml
-kubectl apply -f ../refr-k8s/crossplane-rbac.yaml   # Namespace management permissions
 ```
+
+> **Note**: Namespace-management RBAC for the Crossplane SA is handled by `setup.sh` (standalone mode) or by Nordri's `crossplane-configs.yaml` (when running atop Nordri with `--skip-crossplane`).
 
 ## 5. Install Operators
 
@@ -91,7 +92,7 @@ kubectl apply -f ../refr-k8s/crossplane-rbac.yaml   # Namespace management permi
 ```bash
 helm repo add strimzi https://strimzi.io/charts/
 helm install strimzi-kafka-operator strimzi/strimzi-kafka-operator \
-  --namespace kafka-system --create-namespace \
+  --namespace kafka --create-namespace \
   --set watchAnyNamespace=true
 ```
 
@@ -100,26 +101,26 @@ helm install strimzi-kafka-operator strimzi/strimzi-kafka-operator \
 ```bash
 helm repo add ot-helm https://ot-container-kit.github.io/helm-charts/
 helm install redis-operator ot-helm/redis-operator \
-  --namespace valkey-system --create-namespace
+  --namespace valkey --create-namespace
 ```
 
 ### Percona (PostgreSQL, MongoDB, MySQL)
 
 ```bash
-kubectl create namespace percona-system
+kubectl create namespace percona
 helm repo add percona https://percona.github.io/percona-helm-charts/
 helm repo update
 
 helm install percona-postgresql-operator percona/pg-operator \
-  --namespace percona-system \
+  --namespace percona \
   --set watchAllNamespaces=true
 
 helm install psmdb-operator percona/psmdb-operator \
-  --namespace percona-system \
+  --namespace percona \
   --set watchAllNamespaces=true
 
 helm install pxc-operator percona/pxc-operator \
-  --namespace percona-system \
+  --namespace percona \
   --set watchAllNamespaces=true
 ```
 
@@ -134,9 +135,9 @@ kubectl apply -f percona/rbac.yaml
 ### Verify All Operators
 
 ```bash
-kubectl get pods -n kafka-system
-kubectl get pods -n valkey-system
-kubectl get pods -n percona-system
+kubectl get pods -n kafka
+kubectl get pods -n valkey
+kubectl get pods -n percona
 ```
 
 All operator pods should be `Running` and `Ready`.
@@ -188,6 +189,15 @@ k3d cluster create mimir-test --port "9080:80@loadbalancer" --port "9443:443@loa
 kubectl kuttl test tests/e2e/
 ```
 
+When running atop Nordri (which installs its own Traefik), disable the k3s built-in Traefik:
+
+```bash
+k3d cluster create refr-k8s \
+  --port "8080:80@loadbalancer" --port "8443:443@loadbalancer" \
+  --agents 2 --k3s-arg "--disable=traefik@server:*"
+# Then: bootstrap Nordri, then ./setup.sh --skip-crossplane
+```
+
 The script is idempotent (`helm upgrade --install`, `--dry-run=client`). Flags:
 - `--skip-crossplane` — if Crossplane is managed by your infra repo
 - `--patch-security-context` — needed on Rancher Desktop (patches PG operator `runAsNonRoot`; not needed on k3d)
@@ -237,7 +247,7 @@ spec:
       values: |
         watchAllNamespaces: true
   destination:
-    namespace: percona-system
+    namespace: percona
 ```
 
 ### Key gotcha for Argo
@@ -268,15 +278,15 @@ Recommended: test on GKE without the patch first. If needed, a Kustomize post-re
 Most common cause: PG operator is not watching the claim's namespace. Check:
 
 ```bash
-kubectl get deployment -n percona-system percona-postgresql-operator-pg-operator \
+kubectl get deployment -n percona percona-postgresql-operator-pg-operator \
   -o jsonpath='{.spec.template.spec.containers[0].env}' | python3 -m json.tool
 ```
 
-If `WATCH_NAMESPACE` is set to `percona-system` (not empty), the operator needs to be upgraded:
+If `WATCH_NAMESPACE` is set to `percona` (not empty), the operator needs to be upgraded:
 
 ```bash
 helm upgrade percona-postgresql-operator percona/pg-operator \
-  --namespace percona-system \
+  --namespace percona \
   --set watchAllNamespaces=true
 ```
 

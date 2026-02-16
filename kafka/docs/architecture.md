@@ -30,7 +30,7 @@ The Kafka service uses a layered architecture that separates infrastructure mana
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                   kafka-system Namespace                    │
+│                   kafka Namespace                    │
 │  ┌───────────────────────────────────────────────────────┐  │
 │  │ Strimzi Operator                                      │  │
 │  └───────────────────────────────────────────────────────┘  │
@@ -111,13 +111,13 @@ For production, you may want separate controller and broker node pools.
 Strimzi creates a bootstrap service for client connections:
 
 ```
-<cluster-name>-kafka-bootstrap.kafka-system.svc:9092
+<cluster-name>-kafka-bootstrap.kafka.svc:9092
 ```
 
 Individual broker services are also available:
 
 ```
-<cluster-name>-kafka-<broker-id>.kafka-system.svc:9092
+<cluster-name>-kafka-<broker-id>.kafka.svc:9092
 ```
 
 ## Storage

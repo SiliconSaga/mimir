@@ -255,7 +255,7 @@ metadata:
 subjects:
 - kind: ServiceAccount
   name: percona-postgresql-operator-pg-operator
-  namespace: percona-system
+  namespace: percona
 roleRef:
   kind: ClusterRole
   name: percona-postgresql-operator-pg-operator-cluster-role

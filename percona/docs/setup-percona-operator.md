@@ -12,10 +12,10 @@ This guide covers the installation of Percona Operators for PostgreSQL and Mongo
 
 ### Consolidated Namespace
 
-We use a single namespace `percona-system` for all database operators.
+We use a single namespace `percona` for all database operators.
 
 ```bash
-kubectl create ns percona-system
+kubectl create ns percona
 ```
 
 ### Install RBAC for Crossplane
@@ -48,7 +48,7 @@ kubectl apply -f ../postgres-operator-rbac.yaml
 helm repo add percona https://percona.github.io/percona-helm-charts/
 helm repo update
 helm install percona-postgresql-operator \
-  --namespace percona-system \
+  --namespace percona \
   --set watchAllNamespaces=true \
   percona/pg-operator
 ```
@@ -59,7 +59,7 @@ helm install percona-postgresql-operator \
 
 ```bash
 helm install psmdb-operator \
-  --namespace percona-system \
+  --namespace percona \
   --set watchAllNamespaces=true \
   percona/psmdb-operator
 ```
@@ -68,7 +68,7 @@ helm install psmdb-operator \
 
 ```bash
 helm install pxc-operator \
-  --namespace percona-system \
+  --namespace percona \
   --set watchAllNamespaces=true \
   percona/pxc-operator
 ```
@@ -78,17 +78,17 @@ helm install pxc-operator \
 Check that all operators are running in the shared namespace:
 
 ```bash
-kubectl get pods -n percona-system
+kubectl get pods -n percona
 
 # Check individual operator logs
-kubectl logs -n percona-system -l app.kubernetes.io/name=pg-operator
-kubectl logs -n percona-system -l app.kubernetes.io/name=psmdb-operator
-kubectl logs -n percona-system -l app.kubernetes.io/name=pxc-operator
+kubectl logs -n percona -l app.kubernetes.io/name=pg-operator
+kubectl logs -n percona -l app.kubernetes.io/name=psmdb-operator
+kubectl logs -n percona -l app.kubernetes.io/name=pxc-operator
 ```
 
 Verify operators are watching all namespaces (critical for Crossplane-managed claims):
 
 ```bash
 # Should show WATCH_NAMESPACE is empty or watchAllNamespaces is true
-kubectl get deployment -n percona-system -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{range .spec.template.spec.containers[*]}{range .env[*]}{.name}={.value}{" "}{end}{end}{"\n"}{end}'
+kubectl get deployment -n percona -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{range .spec.template.spec.containers[*]}{range .env[*]}{.name}={.value}{" "}{end}{end}{"\n"}{end}'
 ```

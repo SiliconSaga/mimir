@@ -133,7 +133,7 @@ Feature: Mimir Infrastructure Layer
 
   Scenario: Kafka Provisioning
     Given the KafkaCluster Claim "kafka-test" is applied
-    Then the "Kafka" cluster should be ready in "kafka-system"
+    Then the "Kafka" cluster should be ready in "kafka"
     And the Crossplane claim "kafka-test" should be "Ready"
 ```
 
@@ -278,8 +278,8 @@ BUILD_ID=${1:-"manual"}
 kubectl delete namespace test-${BUILD_ID} --ignore-not-found
 
 # Clean up operator resources (Kafka, Valkey in their namespaces)
-kubectl delete kafka -l test-run=${BUILD_ID} -n kafka-system --ignore-not-found
-kubectl delete rediscluster -l test-run=${BUILD_ID} -n valkey-system --ignore-not-found
+kubectl delete kafka -l test-run=${BUILD_ID} -n kafka --ignore-not-found
+kubectl delete rediscluster -l test-run=${BUILD_ID} -n valkey --ignore-not-found
 ```
 
 ### Resource Labeling for Tests

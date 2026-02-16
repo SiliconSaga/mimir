@@ -35,7 +35,7 @@ spec:
                 kind: Kafka
                 metadata:
                   name: {{ .observed.composite.resource.metadata.name }}
-                  namespace: kafka-system
+                  namespace: kafka
                   annotations:
                     strimzi.io/kraft: "enabled"
                     strimzi.io/node-pools: "enabled"
@@ -86,7 +86,7 @@ spec:
                 kind: KafkaNodePool
                 metadata:
                   name: {{ .observed.composite.resource.metadata.name }}-combined
-                  namespace: kafka-system
+                  namespace: kafka
                   labels:
                     strimzi.io/cluster: {{ .observed.composite.resource.metadata.name }}
                 spec:
