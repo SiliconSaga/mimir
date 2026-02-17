@@ -28,9 +28,9 @@ This creates a 3-node cluster (1 server + 2 agents) with port-forwarding for ing
 helm repo add crossplane-stable https://charts.crossplane.io/stable
 helm repo update
 helm install crossplane crossplane-stable/crossplane \
-  --namespace crossplane-system --create-namespace
+  --namespace crossplane --create-namespace
 kubectl wait --for=condition=available deployment/crossplane \
-  -n crossplane-system --timeout=120s
+  -n crossplane --timeout=120s
 ```
 
 ## 3. Install Crossplane Providers & Functions

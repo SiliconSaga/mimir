@@ -302,7 +302,7 @@ schedules:
     schedule: "0 2 * * *"
     template:
       includedNamespaces: ["*"]
-      excludedNamespaces: ["kube-system", "crossplane-system"]
+      excludedNamespaces: ["kube-system", "crossplane"]
       snapshotVolumes: true
       ttl: 168h0m0s  # 7 days
 ```

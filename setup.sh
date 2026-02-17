@@ -34,7 +34,7 @@ if [ "$SKIP_CROSSPLANE" = false ]; then
   helm repo add crossplane-stable https://charts.crossplane.io/stable 2>/dev/null
   helm repo update >/dev/null
   helm upgrade --install crossplane crossplane-stable/crossplane \
-    --namespace crossplane-system --create-namespace --wait --version 2.1.4
+    --namespace crossplane --create-namespace --wait --version 2.1.4
 
   echo "=== Crossplane Providers & Functions ==="
   kubectl apply -f platform.yaml
@@ -92,7 +92,7 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: crossplane
-  namespace: crossplane-system
+  namespace: crossplane
 RBAC
 fi
 

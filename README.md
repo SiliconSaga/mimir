@@ -31,7 +31,7 @@ k3d cluster create mimir-test --port "9080:80@loadbalancer" --port "9443:443@loa
 kubectl kuttl test tests/e2e/
 ```
 
-The script is idempotent (`helm upgrade --install`, `--dry-run=client`). Use `--skip-crossplane` if Crossplane is managed by your infra repo.
+The script is idempotent (`helm upgrade --install`, `--dry-run=client`). Use `--skip-crossplane` if Crossplane is managed by your infra repo. Use `--patch-security-context` if you are using Rancher
 
 ## Usage
 

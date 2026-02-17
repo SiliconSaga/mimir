@@ -34,4 +34,4 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: crossplane
-  namespace: crossplane-system
+  namespace: crossplane
