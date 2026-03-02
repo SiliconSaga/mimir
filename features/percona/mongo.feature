@@ -19,12 +19,10 @@ Feature: Percona MongoDB Services
     Given a provisioned MongoDBInstance "my-mongo-db"
     Then I should be able to connect and run a ping command
 
-  @component:mimir-percona-mongo @phase:2 @wip
-  Scenario: MongoDB Backup & Restore
+  @component:mimir-percona-mongo @phase:2  Scenario: MongoDB Backup & Restore
     Given the DB "my-mongo-db" contains data
     When I trigger an on-demand backup "backup-mongo-01"
     Then the backup should complete successfully
 
-  @component:mimir-percona-mongo @phase:3 @wip
-  Scenario: MongoDB Monitoring
+  @component:mimir-percona-mongo @phase:3  Scenario: MongoDB Monitoring
     Then the PMM agent should be registered for "my-mongo-db"

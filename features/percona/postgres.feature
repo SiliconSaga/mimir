@@ -19,15 +19,13 @@ Feature: Percona PostgreSQL Services
     Given a provisioned PostgreSQLInstance "my-pg-db"
     Then I should be able to connect and run "SELECT 1"
 
-  @component:mimir-percona-postgres @phase:2 @wip
-  Scenario: PostgreSQL Backup & Restore
+  @component:mimir-percona-postgres @phase:2  Scenario: PostgreSQL Backup & Restore
     Given the DB "my-pg-db" contains data
     When I trigger an on-demand backup "backup-01"
     And I delete the DB "my-pg-db"
     And I restore from "backup-01"
     Then the data should be present
 
-  @component:mimir-percona-postgres @phase:3 @wip
-  Scenario: PostgreSQL Monitoring
+  @component:mimir-percona-postgres @phase:3  Scenario: PostgreSQL Monitoring
     Then the PMM agent should be registered for "my-pg-db"
     And I should see query metrics in PMM

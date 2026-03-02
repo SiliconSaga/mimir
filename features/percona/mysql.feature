@@ -19,12 +19,10 @@ Feature: Percona MySQL Services
     Given a provisioned MySQLInstance "my-mysql-db"
     Then I should be able to connect and run "SELECT 1"
 
-  @component:mimir-percona-mysql @phase:2 @wip
-  Scenario: MySQL Backup & Restore
+  @component:mimir-percona-mysql @phase:2  Scenario: MySQL Backup & Restore
     Given the DB "my-mysql-db" contains data
     When I trigger an on-demand backup "backup-mysql-01"
     Then the backup should complete successfully
 
-  @component:mimir-percona-mysql @phase:3 @wip
-  Scenario: MySQL Monitoring
+  @component:mimir-percona-mysql @phase:3  Scenario: MySQL Monitoring
     Then the PMM agent should be registered for "my-mysql-db"
