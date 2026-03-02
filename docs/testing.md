@@ -61,7 +61,7 @@ Since native Windows binaries are not available for recent Kuttl versions, we us
 .\test.ps1
 
 # Run specific test
-.\test.ps1 --test kafka-provisioning
+.\test.ps1 --test kafka
 ```
 
 The script automatically:
@@ -91,19 +91,19 @@ mimir/
 ├── kuttl-test.yaml               # Test suite configuration
 └── tests/
     └── e2e/
-        ├── kafka-provisioning/
+        ├── kafka/
         │   ├── 00-apply.yaml     # Apply KafkaCluster claim
         │   └── 01-assert.yaml    # Assert Ready state
-        ├── valkey-provisioning/
+        ├── valkey/
         │   ├── 00-apply.yaml     # Apply ValkeyCluster claim
         │   └── 01-assert.yaml    # Assert Ready state
-        ├── postgres-provisioning/
+        ├── postgres/
         │   ├── 00-apply.yaml     # Apply PostgreSQLInstance claim
         │   └── 01-assert.yaml    # Assert Ready state
-        ├── mysql-provisioning/
+        ├── mysql/
         │   ├── 00-apply.yaml     # Apply MySQLInstance claim
         │   └── 01-assert.yaml    # Assert Ready state
-        └── mongodb-provisioning/
+        └── mongodb/
             ├── 00-apply.yaml     # Apply MongoDBInstance claim
             └── 01-assert.yaml    # Assert Ready state
 ```
@@ -115,8 +115,7 @@ mimir/
 kubectl kuttl test tests/e2e/
 
 # Run specific test
-kubectl kuttl test tests/e2e/ --test kafka-provisioning
-
+kubectl kuttl test tests/e2e/ --test kafka
 # With verbose output
 kubectl kuttl test tests/e2e/ --v 3
 ```
@@ -145,15 +144,15 @@ For rapid testing of individual components:
 
 ```bash
 # Test only Kafka
-kubectl kuttl test tests/e2e/ --test kafka-provisioning --v 3
+kubectl kuttl test tests/e2e/ --test kafka --v 3
 
 # Test only Valkey
-kubectl kuttl test tests/e2e/ --test valkey-provisioning --v 3
+kubectl kuttl test tests/e2e/ --test valkey --v 3
 
 # Test only databases
-kubectl kuttl test tests/e2e/ --test postgres-provisioning --v 3
-kubectl kuttl test tests/e2e/ --test mysql-provisioning --v 3
-kubectl kuttl test tests/e2e/ --test mongodb-provisioning --v 3
+kubectl kuttl test tests/e2e/ --test postgres --v 3
+kubectl kuttl test tests/e2e/ --test mysql --v 3
+kubectl kuttl test tests/e2e/ --test mongodb --v 3
 ```
 
 Each test creates isolated resources and cleans up automatically.
@@ -204,7 +203,7 @@ Given('the KafkaCluster Claim {string} is applied', function (name) {
 apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
-  name: kafka-provisioning
+  name: kafka
 spec:
   steps:
   - try:
@@ -428,11 +427,11 @@ jobs:
 
 | Test | Component | API Group |
 |------|-----------|-----------|
-| `kafka-provisioning` | Strimzi Kafka (KRaft) | `mimir.siliconsaga.org` |
-| `valkey-provisioning` | OT-Container-Kit Redis | `mimir.siliconsaga.org` |
-| `postgres-provisioning` | Percona PostgreSQL | `database.example.org` |
-| `mysql-provisioning` | Percona XtraDB | `database.example.org` |
-| `mongodb-provisioning` | Percona MongoDB | `database.example.org` |
+| `kafka` | Strimzi Kafka (KRaft) | `mimir.siliconsaga.org` |
+| `valkey` | OT-Container-Kit Redis | `mimir.siliconsaga.org` |
+| `postgres` | Percona PostgreSQL | `database.example.org` |
+| `mysql` | Percona XtraDB | `database.example.org` |
+| `mongodb` | Percona MongoDB | `database.example.org` |
 
 The `features/infrastructure.feature` file remains the source of truth for expected behavior, while kuttl implements the actual test execution.
 

@@ -46,18 +46,18 @@ Mimir uses [kuttl](https://kuttl.dev/) for Kubernetes-native e2e testing, with B
 kubectl kuttl test tests/e2e/
 
 # Run specific test
-kubectl kuttl test tests/e2e/ --test kafka-provisioning
+kubectl kuttl test tests/e2e/ --test kafka
 ```
 
 ### Test Coverage
 
 | Component | Test | Provisioning Time |
 |-----------|------|-------------------|
-| Kafka (Strimzi) | `kafka-provisioning` | ~70-112s |
-| Valkey (OT-Container-Kit) | `valkey-provisioning` | ~40-52s |
-| PostgreSQL (Percona) | `postgres-provisioning` | ~150-210s |
-| MySQL (Percona) | `mysql-provisioning` | ~257-330s |
-| MongoDB (Percona) | `mongodb-provisioning` | ~126-140s |
+| Kafka (Strimzi) | `kafka` | ~70-112s |
+| Valkey (OT-Container-Kit) | `valkey` | ~40-52s |
+| PostgreSQL (Percona) | `postgres` | ~150-210s |
+| MySQL (Percona) | `mysql` | ~257-330s |
+| MongoDB (Percona) | `mongodb` | ~126-140s |
 
 > Tests run sequentially (`parallel: 1`). Full suite takes ~12 minutes on a 3-node k3d cluster. Timings measured on a fresh cluster with images pre-pulled for most components.
 
