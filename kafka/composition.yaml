@@ -97,7 +97,6 @@ spec:
                   storage:
                     type: persistent-claim
                     size: {{ .observed.composite.resource.spec.parameters.storageSize | default "10Gi" }}
-                    class: local-path
                     deleteClaim: false
                   resources:
                     requests:

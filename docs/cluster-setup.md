@@ -208,68 +208,50 @@ The script is idempotent (`helm upgrade --install`, `--dry-run=client`). Flags:
 k3d cluster delete mimir-test
 ```
 
-## Argo CD Integration
+## ArgoCD Deployment (via Nidavellir)
 
-The setup has a natural ordering that maps to Argo CD sync waves:
+In production, Mimir is deployed via ArgoCD rather than `setup.sh`. The `argocd/` directory contains everything ArgoCD needs:
 
-| Wave | Resources | Why |
-|------|-----------|-----|
-| 0 | Crossplane core (Helm) | Foundation |
-| 1 | `platform.yaml` (Providers, Functions) | Need Crossplane CRDs |
-| 2 | `provider-configs.yaml`, RBAC | Need provider CRDs registered |
-| 3 | Operator Helm releases (Strimzi, OT, Percona) | Need working Crossplane |
-| 4 | `percona/rbac.yaml` | Needs Percona CRDs |
-| 5 | XRDs and Compositions | Needs operators + Crossplane ready |
+- **`argocd/kustomization.yaml`** — top-level entry point referencing operator Applications, RBAC, XRDs, and Compositions
+- **`argocd/apps/`** — individual ArgoCD Application manifests for each operator
 
-### Recommended restructuring for Argo
+Nidavellir's `mimir-app.yaml` points ArgoCD at `argocd/` in the mimir repo. Nordri's `bootstrap.sh` hydrates all three repos (nordri, nidavellir, mimir) into the in-cluster Gitea.
 
-1. **App-of-Apps pattern**: One root Application pointing to a directory of Application manifests.
-2. **Each wave = one Application** with `argocd.argoproj.io/sync-wave` annotations.
-3. **Operators via Helm**: Argo natively supports `kind: Application` with `source.helm` — no need for a setup script.
-4. **Health checks**: Argo already understands Crossplane health for Providers/Functions. For Percona CRDs, you may need custom health checks or just rely on sync-wave ordering.
-5. **Move `crossplane-rbac.yaml` into this repo** rather than referencing `../refr-k8s/` (Argo needs self-contained repos).
+### Operator Applications
 
-Example Application for Percona operators:
+| Application | Chart | Namespace | Notes |
+|-------------|-------|-----------|-------|
+| `mimir-strimzi` | `strimzi-kafka-operator` 0.50.0 | `kafka` | `watchAnyNamespace: true` |
+| `mimir-valkey-operator` | `redis-operator` 0.23.0 | `valkey` | Chart name is "redis-operator" but deploys Valkey |
+| `mimir-percona-pg-operator` | `pg-operator` 2.8.2 | `percona` | Kustomize-rendered (see below) |
+| `mimir-percona-psmdb-operator` | `psmdb-operator` 1.21.3 | `percona` | `watchAllNamespaces: true` |
+| `mimir-percona-pxc-operator` | `pxc-operator` 1.19.0 | `percona` | `watchAllNamespaces: true` |
 
-```yaml
-apiVersion: argoproj.io/v1alpha1
-kind: Application
-metadata:
-  name: mimir-percona-operators
-  annotations:
-    argocd.argoproj.io/sync-wave: "3"
-spec:
-  source:
-    repoURL: https://percona.github.io/percona-helm-charts/
-    chart: pg-operator
-    targetRevision: "*"
-    helm:
-      values: |
-        watchAllNamespaces: true
-  destination:
-    namespace: percona
+### ServerSideApply (required for all operators)
+
+All operator Applications use `ServerSideApply=true` in their syncOptions. This is **required**, not optional.
+
+**Background**: When Kubernetes applies a resource using client-side apply (the default), it stores the entire "last-applied-configuration" as an annotation. CRDs for database operators are often very large (hundreds of KB of OpenAPI schema). When the annotation exceeds 262,144 bytes, the apply fails with:
+
+```
+metadata.annotations: Too long: must have at most 262144 bytes
 ```
 
-### Key gotcha for Argo
+Server-side apply uses server-managed field ownership instead of the annotation, avoiding the size limit. It's the standard fix for large CRDs and has no drawbacks for normal resources. If you add a new operator Application, always include `ServerSideApply=true`.
 
-The `provider-configs.yaml` will fail if applied before provider CRDs exist. In Argo, this means wave 2 must not sync until wave 1 providers report Healthy. Use `argocd.argoproj.io/sync-wave` plus a `SyncPolicy` with `retry` to handle the ordering, or split into separate Applications with explicit dependencies.
+### Percona PG operator: runAsNonRoot patch
 
-### Percona PG operator `runAsNonRoot` issue
+The pg-operator Helm chart (2.8.2) hardcodes `runAsNonRoot: true` in the operator Deployment with no Helm values override. This causes `CreateContainerConfigError` on Rancher Desktop and potentially GKE.
 
-The pg-operator Helm chart (2.8.2) hardcodes `runAsNonRoot: true` in the operator deployment's container securityContext with **no values.yaml override**. This causes `CreateContainerConfigError` on environments that enforce this strictly (confirmed on Rancher Desktop, may affect GKE with Pod Security Standards).
+The fix uses **Kustomize helmCharts rendering** in `argocd/apps/percona-pg-operator/kustomization.yaml`:
 
-Note: This is the **operator deployment itself**, not the workload pods. The workload-level fix is in `PostgresComp.yaml` (`initContainer.containerSecurityContext.runAsNonRoot: false`) and works declaratively. The operator deployment patch is the problematic part.
+1. Kustomize renders the Helm chart locally (requires `--enable-helm` in ArgoCD's kustomize.buildOptions — set in Nordri's `bootstrap.sh`)
+2. A JSON patch sets `runAsNonRoot: false` on the rendered Deployment
+3. `includeCRDs: true` is required — Kustomize does NOT include Helm CRDs by default (unlike `helm install`)
 
-Not needed on k3d. The setup script supports `--patch-security-context` for environments that need it. For Argo CD, the imperative `kubectl patch` will be reverted on each sync. Options:
+The ArgoCD Application for PG operator points to this directory (Kustomize source) instead of using a Helm source directly.
 
-| Approach | Argo-compatible | Complexity |
-|----------|----------------|------------|
-| **Kustomize post-renderer** on the Helm Application | Yes | Medium — add a `kustomization.yaml` with a strategic merge patch |
-| **PR to Percona** to expose `containerSecurityContext` as a Helm value | Yes (once merged) | Low, but depends on upstream acceptance |
-| **Argo post-sync resource hook** (Job that runs `kubectl patch`) | Partially — runs after each sync | Fragile, races with rollout |
-| **Skip it** (if GKE doesn't need it) | Yes | None — test on GKE first |
-
-Recommended: test on GKE without the patch first. If needed, a Kustomize post-renderer is the cleanest Argo-native solution.
+Note: This is the **operator deployment** fix. The workload-level fix (PG cluster pods) is handled separately in `PostgresComp.yaml` via `initContainer.containerSecurityContext.runAsNonRoot: false`.
 
 ## Troubleshooting
 
@@ -298,12 +280,10 @@ This happens when a Crossplane Object's CEL readiness query (e.g., `object.statu
 
 The operator pod fails to start with `container has runAsNonRoot and image will run as root`. This happens on Rancher Desktop and potentially GKE with strict Pod Security Standards. Not observed on k3d.
 
-Two separate fixes may be needed:
+Two separate fixes exist:
 
-1. **Operator deployment** (the operator pod itself): `./setup.sh --patch-security-context`
-2. **Workload init containers** (PG cluster pods): Already handled in `PostgresComp.yaml` via `initContainer.containerSecurityContext.runAsNonRoot: false`
-
-The operator patch is imperative and incompatible with Argo CD. See the "Argo CD Integration" section for alternatives.
+1. **Operator deployment** (the operator pod itself): In standalone mode, use `./setup.sh --patch-security-context`. In ArgoCD mode, this is handled automatically by the Kustomize helmCharts patch — see "ArgoCD Deployment" section above.
+2. **Workload init containers** (PG cluster pods): Handled in `PostgresComp.yaml` via `initContainer.containerSecurityContext.runAsNonRoot: false`.
 
 ### provider-configs.yaml fails on apply
 

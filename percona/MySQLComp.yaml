@@ -51,7 +51,6 @@ spec:
                         resources:
                           requests:
                             storage: {{ .observed.composite.resource.spec.parameters.storageSize }}
-                        storageClassName: local-path
                   haproxy:
                     enabled: true
                     size: {{ .observed.composite.resource.spec.parameters.replicas }}

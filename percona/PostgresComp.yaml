@@ -60,7 +60,6 @@ spec:
                       resources:
                         requests:
                           storage: {{ .observed.composite.resource.spec.parameters.storageSize }}
-                      storageClassName: local-path
                     initContainer:
                       image: percona/percona-postgresql-operator:2.7.0
                       containerSecurityContext:
@@ -78,7 +77,6 @@ spec:
                             resources:
                               requests:
                                 storage: "1Gi"
-                            storageClassName: local-path
                   proxy:
                     pgBouncer:
                       image: "percona/percona-postgresql-operator:2.6.0-ppg15-pgbouncer"

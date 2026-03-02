@@ -1,0 +1,21 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+helmCharts:
+  - name: pg-operator
+    repo: https://percona.github.io/percona-helm-charts/
+    version: 2.8.2
+    releaseName: percona-postgresql-operator
+    namespace: percona
+    includeCRDs: true
+    valuesInline:
+      watchAllNamespaces: true
+
+patches:
+  - target:
+      kind: Deployment
+      name: percona-postgresql-operator-pg-operator
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/securityContext/runAsNonRoot
+        value: false

@@ -21,7 +21,15 @@ Enterprise-grade SQL and NoSQL databases powered by **Percona Operators**.
 - **Supported**: PostgreSQL, MySQL (XtraDB), MongoDB.
 - **Use Case**: Primary relational or document storage.
 
-## Quick Start
+## Deployment
+
+### Via ArgoCD (production)
+
+Mimir is deployed automatically when bootstrapping via [Nordri](../nordri/). The `argocd/` directory contains operator Applications, XRDs, and Compositions as a Kustomize root. Nidavellir's `mimir-app.yaml` tells ArgoCD to sync this directory.
+
+See [cluster-setup.md](docs/cluster-setup.md#argocd-deployment-via-nidavellir) for details on operator Applications, ServerSideApply requirements, and the PG operator runAsNonRoot patch.
+
+### Standalone (development/testing)
 
 For a fresh system with k3d already installed:
 
@@ -31,7 +39,7 @@ k3d cluster create mimir-test --port "9080:80@loadbalancer" --port "9443:443@loa
 kubectl kuttl test tests/e2e/
 ```
 
-The script is idempotent (`helm upgrade --install`, `--dry-run=client`). Use `--skip-crossplane` if Crossplane is managed by your infra repo. Use `--patch-security-context` if you are using Rancher
+The script is idempotent (`helm upgrade --install`, `--dry-run=client`). Use `--skip-crossplane` if Crossplane is managed by your infra repo. Use `--patch-security-context` if you are using Rancher Desktop.
 
 ## Usage
 

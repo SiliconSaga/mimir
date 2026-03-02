@@ -55,7 +55,6 @@ spec:
                         resources:
                           requests:
                             storage: {{ .observed.composite.resource.spec.parameters.storageSize }}
-                        storageClassName: local-path
                     podDisruptionBudget:
                       maxUnavailable: 1
                   sharding:
