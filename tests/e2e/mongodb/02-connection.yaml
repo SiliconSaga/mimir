@@ -13,10 +13,42 @@ commands:
         echo "Secret not found yet, waiting..."
         sleep 2
       done
-      MONGO_USER=$(kubectl get secret mongo-e2e-test-secrets -n $NAMESPACE -o jsonpath='{.data.MONGODB_USER_ADMIN_USER}' | base64 -d)
-      MONGO_PASS=$(kubectl get secret mongo-e2e-test-secrets -n $NAMESPACE -o jsonpath='{.data.MONGODB_USER_ADMIN_PASSWORD}' | base64 -d)
-      kubectl run mongo-client --namespace $NAMESPACE --image=percona/percona-server-mongodb:6.0 --restart=Never --command -- sh -c "for i in \$(seq 1 12); do mongosh \"mongodb://${MONGO_USER}:${MONGO_PASS}@mongo-e2e-test:27017/admin?directConnection=true\" --eval \"db.runCommand({ ping: 1 })\" && exit 0; echo \"Retry \$i...\"; sleep 5; done; exit 1"
-      # kubectl wait --for=jsonpath='{.status.phase}'=Succeeded is not supported in some versions/environments
+
+      # Use secretKeyRef to inject credentials directly from K8s secret into
+      # the pod env — avoids shell metacharacter issues ($, !, etc. in password)
+      cat <<PODEOF | kubectl apply -f -
+      apiVersion: v1
+      kind: Pod
+      metadata:
+        name: mongo-client
+        namespace: $NAMESPACE
+      spec:
+        restartPolicy: Never
+        containers:
+        - name: mongo-client
+          image: percona/percona-server-mongodb:6.0
+          env:
+          - name: MONGO_USER
+            valueFrom:
+              secretKeyRef:
+                name: mongo-e2e-test-secrets
+                key: MONGODB_USER_ADMIN_USER
+          - name: MONGO_PASS
+            valueFrom:
+              secretKeyRef:
+                name: mongo-e2e-test-secrets
+                key: MONGODB_USER_ADMIN_PASSWORD
+          command: ["sh", "-c"]
+          args:
+          - |
+            for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+              mongosh "mongodb://\${MONGO_USER}:\${MONGO_PASS}@mongo-e2e-test:27017/admin?directConnection=true" --eval "db.runCommand({ ping: 1 })" && exit 0
+              echo "Retry \$i..."
+              sleep 5
+            done
+            exit 1
+      PODEOF
+
       echo "Waiting for pod/mongo-client to succeed..."
       for i in $(seq 1 60); do
         PHASE=$(kubectl get pod mongo-client -n $NAMESPACE -o jsonpath='{.status.phase}')

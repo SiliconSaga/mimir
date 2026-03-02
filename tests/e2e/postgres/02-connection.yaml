@@ -13,9 +13,37 @@ commands:
         echo "Secret not found yet, waiting..."
         sleep 2
       done
-      PGPASSWORD=$(kubectl get secret pg-e2e-test-user-secret -n $NAMESPACE -o jsonpath='{.data.password}' | base64 -d)
-      kubectl run pg-client --namespace $NAMESPACE --image=postgres:15 --restart=Never --env="PGPASSWORD=$PGPASSWORD" --command -- sh -c 'for i in $(seq 1 12); do psql -h pg-e2e-test -U testdb -d testdb -c "SELECT 1;" && exit 0; echo "Retry $i..."; sleep 5; done; exit 1'
-      # kubectl wait --for=jsonpath='{.status.phase}'=Succeeded is not supported in some versions/environments
+
+      # Use secretKeyRef to inject the password directly from K8s secret into
+      # the pod env — avoids shell metacharacter issues ($, !, etc. in password)
+      cat <<PODEOF | kubectl apply -f -
+      apiVersion: v1
+      kind: Pod
+      metadata:
+        name: pg-client
+        namespace: $NAMESPACE
+      spec:
+        restartPolicy: Never
+        containers:
+        - name: pg-client
+          image: postgres:15
+          env:
+          - name: PGPASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: pg-e2e-test-user-secret
+                key: password
+          command: ["sh", "-c"]
+          args:
+          - |
+            for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+              psql -h pg-e2e-test -U testdb -d testdb -c "SELECT 1;" && exit 0
+              echo "Retry \$i..."
+              sleep 5
+            done
+            exit 1
+      PODEOF
+
       echo "Waiting for pod/pg-client to succeed..."
       for i in $(seq 1 60); do
         PHASE=$(kubectl get pod pg-client -n $NAMESPACE -o jsonpath='{.status.phase}')

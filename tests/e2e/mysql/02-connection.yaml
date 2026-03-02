@@ -13,9 +13,37 @@ commands:
         echo "Secret not found yet, waiting..."
         sleep 2
       done
-      MYSQL_PWD=$(kubectl get secret mysql-e2e-test-secrets -n $NAMESPACE -o jsonpath='{.data.root}' | base64 -d)
-      kubectl run mysql-client --namespace $NAMESPACE --image=mysql:8.0 --restart=Never --env="MYSQL_PWD=$MYSQL_PWD" --command -- sh -c 'for i in $(seq 1 12); do mysql -h mysql-e2e-test -u root -e "SELECT 1;" && exit 0; echo "Retry $i..."; sleep 5; done; exit 1'
-      # kubectl wait --for=jsonpath='{.status.phase}'=Succeeded is not supported in some versions/environments
+
+      # Use secretKeyRef to inject the password directly from K8s secret into
+      # the pod env — avoids shell metacharacter issues ($, !, etc. in password)
+      cat <<PODEOF | kubectl apply -f -
+      apiVersion: v1
+      kind: Pod
+      metadata:
+        name: mysql-client
+        namespace: $NAMESPACE
+      spec:
+        restartPolicy: Never
+        containers:
+        - name: mysql-client
+          image: mysql:8.0
+          env:
+          - name: MYSQL_PWD
+            valueFrom:
+              secretKeyRef:
+                name: mysql-e2e-test-secrets
+                key: root
+          command: ["sh", "-c"]
+          args:
+          - |
+            for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+              mysql -h mysql-e2e-test -u root -e "SELECT 1;" && exit 0
+              echo "Retry \$i..."
+              sleep 5
+            done
+            exit 1
+      PODEOF
+
       echo "Waiting for pod/mysql-client to succeed..."
       for i in $(seq 1 60); do
         PHASE=$(kubectl get pod mysql-client -n $NAMESPACE -o jsonpath='{.status.phase}')
