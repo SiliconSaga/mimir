@@ -5,7 +5,7 @@ Feature: Percona MySQL Services
 
   @component:mimir-percona-mysql @phase:0
   Scenario: Percona XtraDB Operator Check
-    Given the "percona-xtradb-cluster-operator" deployment is running
+    Given the "pxc-operator" deployment is running in "percona"
     Then the "perconaxtradbclusters.pxc.percona.com" CRD should be established
 
   @component:mimir-percona-mysql @phase:1
@@ -13,6 +13,11 @@ Feature: Percona MySQL Services
     Given the MySQLInstance Claim "my-mysql-db" is applied
     Then the "perconaxtradbcluster" should be ready in "default"
     And the Crossplane claim "my-mysql-db" should be "Ready"
+
+  @component:mimir-percona-mysql @phase:1
+  Scenario: MySQL Connection
+    Given a provisioned MySQLInstance "my-mysql-db"
+    Then I should be able to connect and run "SELECT 1"
 
   @component:mimir-percona-mysql @phase:2 @wip
   Scenario: MySQL Backup & Restore

@@ -5,7 +5,7 @@ Feature: Percona MongoDB Services
 
   @component:mimir-percona-mongo @phase:0
   Scenario: Percona Mongo Operator Check
-    Given the "percona-server-mongodb-operator" deployment is running
+    Given the "psmdb-operator" deployment is running in "percona"
     Then the "perconaservermongodbs.psmdb.percona.com" CRD should be established
 
   @component:mimir-percona-mongo @phase:1
@@ -13,6 +13,11 @@ Feature: Percona MongoDB Services
     Given the MongoDBInstance Claim "my-mongo-db" is applied
     Then the "perconaservermongodb" should be ready in "default"
     And the Crossplane claim "my-mongo-db" should be "Ready"
+
+  @component:mimir-percona-mongo @phase:1
+  Scenario: MongoDB Connection
+    Given a provisioned MongoDBInstance "my-mongo-db"
+    Then I should be able to connect and run a ping command
 
   @component:mimir-percona-mongo @phase:2 @wip
   Scenario: MongoDB Backup & Restore

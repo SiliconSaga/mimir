@@ -5,14 +5,19 @@ Feature: Percona PostgreSQL Services
 
   @component:mimir-percona-postgres @phase:0
   Scenario: Percona PG Operator Check
-    Given the "percona-postgresql-operator" deployment is running
-    Then the "perconapgclusters.pg.percona.com" CRD should be established
+    Given the "percona-postgresql-operator-pg-operator" deployment is running in "percona"
+    Then the "perconapgclusters.pgv2.percona.com" CRD should be established
 
   @component:mimir-percona-postgres @phase:1
   Scenario: PostgreSQL Provisioning
     Given the PostgreSQLInstance Claim "my-pg-db" is applied
     Then the "perconapgcluster" should be ready in "default"
     And the Crossplane claim "my-pg-db" should be "Ready"
+
+  @component:mimir-percona-postgres @phase:1
+  Scenario: PostgreSQL Connection
+    Given a provisioned PostgreSQLInstance "my-pg-db"
+    Then I should be able to connect and run "SELECT 1"
 
   @component:mimir-percona-postgres @phase:2 @wip
   Scenario: PostgreSQL Backup & Restore
