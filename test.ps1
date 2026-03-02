@@ -33,21 +33,31 @@ $TestDir = Join-Path $RepoRoot "tests\e2e"
 
 # Smart argument handling
 $DockerArgs = @()
+$PrevArg = ""
 foreach ($arg in $args) {
     if ($arg -notmatch "^-") {
-        # Check if it's a known test suite name
+        # If previous arg was --test, this is already its value — pass through as-is
+        if ($PrevArg -eq "--test") {
+            $DockerArgs += $arg
+            $PrevArg = $arg
+            continue
+        }
+
+        # Check if it's a known test suite name (bare name without --test)
         $PotentialTestPath = Join-Path $TestDir $arg
         if (Test-Path $PotentialTestPath) {
             Write-Host "  Auto-detecting test suite: $arg -> --test $arg" -ForegroundColor Yellow
             $DockerArgs += "--test"
             $DockerArgs += $arg
+            $PrevArg = $arg
             continue
         }
-        
+
         # Check if it's a path, convert slashes
         $arg = $arg -replace '\\', '/'
     }
     $DockerArgs += $arg
+    $PrevArg = $arg
 }
 
 # Run Docker container
