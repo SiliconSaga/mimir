@@ -6,6 +6,9 @@ kubeconfig.yaml
 # kuttl test artifacts
 kuttl-test.yaml.bak
 
+# Kustomize helm chart cache (created by --enable-helm)
+argocd/apps/percona-pg-operator/charts/
+
 # IDE
 .idea/
 .vscode/

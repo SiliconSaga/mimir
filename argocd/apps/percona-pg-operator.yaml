@@ -1,0 +1,23 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: mimir-percona-pg-operator
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: 'http://gitea-http.gitea.svc.cluster.local:3000/nordri-admin/mimir.git'
+    targetRevision: HEAD
+    path: argocd/apps/percona-pg-operator
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: percona
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

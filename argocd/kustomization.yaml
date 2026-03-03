@@ -1,0 +1,23 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  # Operator Applications (Helm-based)
+  - apps/strimzi.yaml
+  - apps/valkey-operator.yaml
+  - apps/percona-pg-operator.yaml
+  - apps/percona-psmdb-operator.yaml
+  - apps/percona-pxc-operator.yaml
+  # Operator RBAC (needs operator CRDs to exist)
+  - ../percona/rbac.yaml
+  # XRDs and Compositions (need operator CRDs + Crossplane)
+  - ../kafka/xrd.yaml
+  - ../kafka/composition.yaml
+  - ../valkey/xrd.yaml
+  - ../valkey/composition.yaml
+  - ../percona/PostgresXRD.yaml
+  - ../percona/PostgresComp.yaml
+  - ../percona/MySQLXRD.yaml
+  - ../percona/MySQLComp.yaml
+  - ../percona/MongoXRD.yaml
+  - ../percona/MongoComp.yaml

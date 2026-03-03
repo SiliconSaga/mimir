@@ -1,0 +1,23 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: mimir-valkey-operator
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: 'https://ot-container-kit.github.io/helm-charts/'
+    chart: redis-operator
+    targetRevision: 0.23.0
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: valkey
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
