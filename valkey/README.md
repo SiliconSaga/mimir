@@ -26,13 +26,14 @@ To verify the service works:
     kubectl get valkeyclusters -n mimir
     ```
 3.  **Connection Details**:
-    The service name depends on the generated Composite name.
-    
-    Get the Hostname:
+    The service name is **stable and derived from the claim name** — the
+    composition names the `RedisCluster` after the claim (`crossplane.io/claim-name`),
+    so a claim named `<claim>` always yields the leader Service `<claim>-leader.valkey.svc`.
+    Consumers can hardcode this host; no need to scrape the generated composite name.
+
     ```bash
-    COMPOSITE_NAME=$(kubectl get valkeycluster valkey-test -n mimir -o jsonpath='{.spec.resourceRef.name}')
-    VALKEY_HOST="${COMPOSITE_NAME}-leader.valkey.svc"
-    echo $VALKEY_HOST
+    # For the example claim `valkey-test`:
+    VALKEY_HOST="valkey-test-leader.valkey.svc"
     ```
     - Port: `6379`
 

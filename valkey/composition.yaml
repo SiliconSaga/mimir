@@ -22,7 +22,7 @@ spec:
           apiVersion: kubernetes.crossplane.io/v1alpha2
           kind: Object
           metadata:
-            name: {{ .observed.composite.resource.metadata.name }}-valkey
+            name: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-name" | default .observed.composite.resource.metadata.name }}-valkey
             annotations:
               gotemplating.fn.crossplane.io/composition-resource-name: valkey-cluster
           spec:
@@ -34,7 +34,7 @@ spec:
                 apiVersion: redis.redis.opstreelabs.in/v1beta2
                 kind: RedisCluster
                 metadata:
-                  name: {{ .observed.composite.resource.metadata.name }}
+                  name: {{ index .observed.composite.resource.metadata.labels "crossplane.io/claim-name" | default .observed.composite.resource.metadata.name }}
                   namespace: valkey
                 spec:
                   clusterSize: {{ .observed.composite.resource.spec.parameters.replicas }}

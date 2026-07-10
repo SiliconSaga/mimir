@@ -15,7 +15,7 @@ Feature: Valkey Data Service
 
   @component:mimir-valkey @phase:1  Scenario: Valkey Functional Validation
     Given the ValkeyCluster Claim "valkey-test" is applied
-    Then I should be able to connect to "valkey-test-valkey-leader.valkey.svc:6379"
+    Then I should be able to connect to "valkey-test-leader.valkey.svc:6379"
     And I should receive a "PONG" response
 
   @component:mimir-valkey @phase:2  Scenario: Valkey Persistence
