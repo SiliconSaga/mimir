@@ -8,6 +8,15 @@ To provision a Valkey cluster, create a `ValkeyCluster` claim in your applicatio
 
 See `claim.yaml` for an example.
 
+> **Claim names must be globally unique across the cluster.** Every
+> `ValkeyCluster`, regardless of the namespace its claim lives in, is
+> materialized as a single `RedisCluster` in the shared `valkey` namespace,
+> named after the claim (`crossplane.io/claim-name`). Two claims with the same
+> name in different namespaces would target the same `RedisCluster`. This is the
+> deliberate trade-off that makes the leader Service hostname stable and
+> predictable (see Connection Details) — pick a distinct claim name per vended
+> instance (e.g. `harbor-valkey`).
+
 ### Parameters
 - `replicas`: Number of nodes (default: 3).
 - `storageSize`: PVC size for storage per node (default: "1Gi").
@@ -26,13 +35,14 @@ To verify the service works:
     kubectl get valkeyclusters -n mimir
     ```
 3.  **Connection Details**:
-    The service name depends on the generated Composite name.
-    
-    Get the Hostname:
+    The service name is **stable and derived from the claim name** — the
+    composition names the `RedisCluster` after the claim (`crossplane.io/claim-name`),
+    so a claim named `<claim>` always yields the leader Service `<claim>-leader.valkey.svc`.
+    Consumers can hardcode this host; no need to scrape the generated composite name.
+
     ```bash
-    COMPOSITE_NAME=$(kubectl get valkeycluster valkey-test -n mimir -o jsonpath='{.spec.resourceRef.name}')
-    VALKEY_HOST="${COMPOSITE_NAME}-leader.valkey.svc"
-    echo $VALKEY_HOST
+    # For the example claim `valkey-test`:
+    VALKEY_HOST="valkey-test-leader.valkey.svc"
     ```
     - Port: `6379`
 
