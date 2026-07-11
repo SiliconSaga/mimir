@@ -7,6 +7,11 @@ spec:
   names:
     kind: XValkeyCluster
     plural: xvalkeyclusters
+  # NOTE: the composition names the RedisCluster (and thus its leader Service)
+  # after the claim, in the shared `valkey` namespace — so claim names must be
+  # globally unique across the cluster. Two claims with the same name in
+  # different namespaces would collide on one RedisCluster. This is the
+  # trade-off that gives consumers a stable `<claim>-leader.valkey.svc` host.
   claimNames:
     kind: ValkeyCluster
     plural: valkeyclusters

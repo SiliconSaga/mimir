@@ -8,6 +8,15 @@ To provision a Valkey cluster, create a `ValkeyCluster` claim in your applicatio
 
 See `claim.yaml` for an example.
 
+> **Claim names must be globally unique across the cluster.** Every
+> `ValkeyCluster`, regardless of the namespace its claim lives in, is
+> materialized as a single `RedisCluster` in the shared `valkey` namespace,
+> named after the claim (`crossplane.io/claim-name`). Two claims with the same
+> name in different namespaces would target the same `RedisCluster`. This is the
+> deliberate trade-off that makes the leader Service hostname stable and
+> predictable (see Connection Details) — pick a distinct claim name per vended
+> instance (e.g. `harbor-valkey`).
+
 ### Parameters
 - `replicas`: Number of nodes (default: 3).
 - `storageSize`: PVC size for storage per node (default: "1Gi").
