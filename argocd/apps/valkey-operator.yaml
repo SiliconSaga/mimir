@@ -11,6 +11,20 @@ spec:
     repoURL: 'https://ot-container-kit.github.io/helm-charts/'
     chart: redis-operator
     targetRevision: 0.23.0
+    helm:
+      values: |
+        # The chart ships requests == limits at 500m/500Mi (Guaranteed QoS), which
+        # reserves half a CPU for an idle controller — measured steady-state use is
+        # ~3m CPU / ~17Mi. On a bin-packed cluster that reservation is what forces
+        # extra nodes, so requests are sized to reality while limits keep headroom
+        # for reconcile bursts.
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 500Mi
   destination:
     server: https://kubernetes.default.svc
     namespace: valkey

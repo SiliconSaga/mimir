@@ -14,6 +14,17 @@ spec:
     helm:
       values: |
         watchAllNamespaces: true
+        # The chart default requests 100m/20Mi. Both are wrong in opposite
+        # directions: measured use is ~3m CPU but ~37Mi memory, so the memory
+        # request sat *below* actual usage — which makes the pod a first-choice
+        # eviction candidate under node memory pressure.
+        resources:
+          requests:
+            cpu: 25m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 500Mi
   destination:
     server: https://kubernetes.default.svc
     namespace: percona

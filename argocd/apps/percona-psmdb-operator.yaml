@@ -14,6 +14,18 @@ spec:
     helm:
       values: |
         watchAllNamespaces: true
+        # The chart ships `resources: {}`, so this operator ran BestEffort with no
+        # guaranteed share at all. That is the class of workload that failed to
+        # start during the 2026-07-27 incident: on a contended node a BestEffort
+        # pod loses the CPU race and misses its probe deadlines. Modest requests
+        # buy it a floor.
+        resources:
+          requests:
+            cpu: 25m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 500Mi
   destination:
     server: https://kubernetes.default.svc
     namespace: percona
