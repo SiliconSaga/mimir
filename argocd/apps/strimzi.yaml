@@ -14,6 +14,16 @@ spec:
     helm:
       values: |
         watchAnyNamespace: true
+        # Steady-state use is ~5m CPU / ~232Mi, so the 200m CPU request was ~40x
+        # actual. Memory is left at the chart default because 232Mi of 384Mi is a
+        # reasonable fit and the operator spikes while reconciling Kafka clusters.
+        resources:
+          requests:
+            cpu: 50m
+            memory: 384Mi
+          limits:
+            cpu: "1"
+            memory: 384Mi
   destination:
     server: https://kubernetes.default.svc
     namespace: kafka

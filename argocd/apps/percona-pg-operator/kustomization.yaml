@@ -10,6 +10,16 @@ helmCharts:
     includeCRDs: true
     valuesInline:
       watchAllNamespaces: true
+      # Chart default requests 100m/20Mi; measured use is ~8m CPU / ~76Mi, so the
+      # memory request sat well below actual usage and made the operator an early
+      # eviction candidate under node memory pressure.
+      resources:
+        requests:
+          cpu: 25m
+          memory: 128Mi
+        limits:
+          cpu: 200m
+          memory: 500Mi
 
 patches:
   - target:
