@@ -70,6 +70,34 @@ Any custom operator should copy this interface rather than invent one. It also m
 
 4. **Stay cluster-per-app.** Costs ~4 pods per consumer, which is the thing that prompted this.
 
+## What the repo history actually shows
+
+Searched for the remembered design and POC: **no branch, no design doc, no deleted design file anywhere in this repo's history.** What is there:
+
+- **`bbd0f3c` (2025-06-14), initial commit:** *"seemingly both DB stacks working with decent docs"* — two stacks were trialled from the start.
+- **`ac793b4` (2025-12-06):** deletes `kubedb-postgres-database.yaml`, `kubedb-postgres-user.yaml`, `kubedb-mongo-database.yaml`, `kubedb-mongo-user.yaml`. **KubeDB was the other stack, and it was evaluated with exactly the vending shape in mind.** The deleted `PostgresUser` reads:
+
+  ```yaml
+  kind: PostgresUser
+  spec:
+    databaseRef: { name: my_database }
+    secretName: my-user-auth
+    privileges: [ALL]
+  ```
+
+  A user bound to a database reference, with a generated Secret — the model this document is looking for. It was tried and set aside.
+- **`573018f` (2026-02-08):** deletes `percona/docs/architecture.md`, whose entire content was four bullets, one of which is load-bearing:
+
+  > **Namespace Isolation**: Each database instance runs in its own namespace for security and resource isolation.
+
+- The only other deleted doc, `percona/TODO.md`, is about PMM and Loki integration — observability, not provisioning.
+
+Two conclusions follow.
+
+**The cluster-per-namespace model was a deliberate, documented decision, not an unfinished one.** "Each database instance runs in its own namespace for security and resource isolation" is a rationale, and it is the strongest argument *against* the shared-cluster direction — consolidating trades that isolation away. The completed design that exists is this one, and it is implemented and e2e-tested.
+
+**The vending idea was never designed in this repo.** It was evidently in mind — KubeDB's user/database resources were trialled — but no successor design was written after Percona was chosen. So there is nothing to recover; the gap is real, and the earlier work that touched it was an evaluation, not a design.
+
 ## Before deciding
 
 - **Recover the earlier POC.** It reportedly exists; it should be read before any of this is re-derived, and its API compared against Strimzi's.
