@@ -52,8 +52,7 @@ spec:
   engine: postgres              # postgres | mysql | mongodb
   placement: shared             # shared | dedicated
   databaseName: forgejo         # optional; defaults to metadata.name
-  # optional, engine-specific, validated per engine:
-  version: "16"
+  # version is only legal when placement: dedicated — see below
   extensions: [pgcrypto]        # postgres only
 status:
   phase: Ready
@@ -65,6 +64,10 @@ status:
 **`placement` is the load-bearing addition.** `shared` vends a database into Mimir's shared cluster for that engine; `dedicated` provisions a cluster in the app's own namespace — which is exactly today's behaviour. So the existing design is not discarded, it becomes a value, and an app can be moved between the two without its manifest changing shape.
 
 This also resolves a tension worth naming: a since-deleted `percona/docs/architecture.md` justified the current model as *"each database instance runs in its own namespace for security and resource isolation."* Under `placement`, that isolation remains available for anything that genuinely needs it, rather than being imposed on everything by default.
+
+**Version is a platform property, not a request parameter.** The platform documents the version it serves for each engine — Postgres X, Mongo Y, MySQL Z — and `spec.version` is **rejected outright when `placement: shared`**. A shared cluster runs one major version for every tenant, so accepting a version field there would be a promise the API cannot keep; failing the request is honest, whereas silently ignoring it is the kind of dead config that looks correct for months. Under `placement: dedicated` the field is honoured, because there the cluster genuinely is the app's own.
+
+That also gives the version-skew story a clean shape: an app that truly needs a different major version is telling you it needs `dedicated`, and the API says so.
 
 **The Secret** carries `host`, `port`, `database`, `username`, `password`, and a ready-assembled connection URI. Its name is reported in `status.secret` so consumers never guess.
 
@@ -99,10 +102,13 @@ Forgejo, with `engine: postgres, placement: shared`. The minimum to get there is
 
 Backups remain out of scope by direction, on the basis that nothing is live. Recorded rather than implied: Percona's pgBackRest writes only to a 1Gi local PVC; Velero's BackupStorageLocation has been `Unavailable` for 149 days; and two PVCs were lost in a single node roll on 2026-08-14, one of them unrecoverable. Consolidating concentrates that exposure from one app to all of them. **Forgejo becoming load-bearing for GitOps is the moment deferring stops being free.**
 
+## Decided
+
+- **The operator lives in the Mimir repo.** Vending data services is Mimir's whole purpose; a separate repo would split the thing from its reason to exist.
+- **Version is platform-documented and rejected under `placement: shared`** (above).
+
 ## Open questions
 
-1. **Where does the operator live** — inside the Mimir repo as a sub-component, or its own repo? Mimir seems right, since it is Mimir's whole purpose.
-2. **Language and framework** — kubebuilder is the default; anything else needs a reason.
-3. **How is the shared cluster declared?** Presumably a plain manifest in Mimir, one per engine, with the operator discovering it by name or label.
-4. **Version skew.** A shared cluster pins one major version for all tenants. Does `spec.version` become advisory, validated-against-the-cluster, or a trigger for `placement: dedicated`?
-5. **Does the existing `PostgreSQLInstance` claim stay** as a thin alias over `DataService`, or is it retired with its three consumers rebuilt?
+1. **How is the shared cluster declared?** Presumably a plain manifest in Mimir, one per engine, with the operator discovering it by name or label rather than by hardcoded reference.
+2. **Does the existing `PostgreSQLInstance` claim stay** as a thin alias over `DataService`, or is it retired with its three consumers rebuilt? It is the current cluster-per-app claim, so under the new API it is exactly `DataService{engine: postgres, placement: dedicated}` — which argues for retiring it rather than maintaining two spellings.
+3. **Framework.** kubebuilder is the default for a Go controller-runtime operator; anything else needs a reason.
