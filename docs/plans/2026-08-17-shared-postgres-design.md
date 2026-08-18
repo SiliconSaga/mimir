@@ -1,20 +1,24 @@
-# Shared PostgreSQL Cluster — Design
+# Shared Database Provisioning — Investigation
 
-**Status:** Draft, ready for plan
+**Status:** Investigation, NOT a decision. Supersedes the CloudNativePG recommendation in this file's first revision, which was wrong.
 **Date:** 2026-08-17
 **Related:** [Data Resiliency Plan](data-resiliency-plan.md) · [Requesting a PostgreSQL Database](../../percona/docs/get-postgres-db.md) · yggdrasil `docs/plans/2026-05-15-forgejo-day2-design.md`
 
-## Overview
+## What this document is now
 
-A `PostgreSQLInstance` claim currently provisions an **entire dedicated PerconaPGCluster** into the claiming namespace. This design changes it to provision **a database on one shared cluster**, which is what the claim's name and its own documentation already imply.
+The first revision recommended moving shared Postgres to CloudNativePG on the strength of its `Database` CRD. **That recommendation was withdrawn after checking the part that mattered.** This revision records the evidence — including the evidence against — so the question is not re-opened from scratch a third time.
 
-The claim API does not change. What changes is what it builds underneath — and, less obviously, **which operator builds it**.
+A prior assessment (months ago, when Mimir was first designed) already compared CNPG against Percona and concluded neither was an ideal fit, with Percona chosen because it covers PostgreSQL, MongoDB and MySQL under one operator family with shared observability and backup tooling. **That conclusion still stands.** Nothing found here overturns it.
 
-## Motivation
+## The actual goal
 
-The current model costs roughly four pods per consuming app — a Postgres instance, a pgBouncer, a pgBackRest repo-host, plus backup jobs — regardless of how little that app uses its database.
+An arbitrary app in the ecosystem needs a database — Postgres, Mongo, MySQL, possibly Kafka or Valkey. It adds **one resource to its own namespace**, and gets back a working database plus either a generated secret or one configured in that same resource.
 
-Measured on GKE, 2026-08-17:
+That is the requirement. Any evaluation has to be judged against it, not against "does Postgres have a per-database CRD".
+
+## Motivation for changing anything at all
+
+A `PostgreSQLInstance` claim currently provisions an **entire dedicated PerconaPGCluster** — roughly four pods per consuming app — regardless of usage. Measured on GKE, 2026-08-17:
 
 | Claim | Namespace | Postgres CPU p95 | Memory p95 |
 |---|---|---|---|
@@ -22,132 +26,79 @@ Measured on GKE, 2026-08-17:
 | `ting-pg` | ting | 70m | 336Mi |
 | `harbor-postgres` | harbor | 60m | 487Mi |
 
-Three databases, three full clusters, ~12 pods, none meaningfully busy. This cluster is meant to fit on three small nodes; it is currently on five with one at 99% of its CPU requests. Per-app clusters scale that overhead linearly with app count, which is the wrong direction for infrastructure that is sparse by design. Adding Forgejo would make it four clusters and ~16 pods.
+Three databases, three full clusters, ~12 pods, none meaningfully busy, on a platform intended to fit three small nodes. Forgejo would make it four clusters and ~16 pods. The shared-cluster direction is right; the question is only how to implement it.
 
-## Goals
+## Evidence
 
-1. **One Postgres cluster, many databases.** A claim yields a database on the shared cluster, not a new cluster.
-2. **Keep the claim API.** `PostgreSQLInstance` with `databaseName` stays the interface.
-3. **Forgejo is the first customer**, and the design must be proven before Forgejo depends on it.
-4. **No data migration.** Existing consumers are torn down and rebuilt, not migrated.
-5. **Move off the placeholder API group.** `database.example.org` becomes `mimir.siliconsaga.org`, matching Kafka and Valkey.
+All verified against the live cluster on 2026-08-17.
 
-## The central question
+### Percona has no per-database primitive
 
-"Give me a database" has to become "a database on the one existing cluster". Something must watch those requests and act on the shared cluster. Three findings, all verified against the live cluster, decide what that something is.
+Four CRDs only: `PerconaPGCluster`, `PerconaPGBackup`, `PerconaPGRestore`, `PerconaPGUpgrade`. Databases and users are declared inside `PerconaPGCluster.spec.users[]`.
 
-### Finding 1 — Percona has no per-database primitive
+That array does declare `x-kubernetes-list-type: map` with `x-kubernetes-list-map-keys: ["name"]`, so in principle independent field managers could each own an entry.
 
-The Percona PG operator ships exactly four CRDs: `PerconaPGCluster`, `PerconaPGBackup`, `PerconaPGRestore`, `PerconaPGUpgrade`. **There is no per-database resource.** The only way to add a database is to append to the shared cluster's `spec.users[]` array.
+**But `provider-kubernetes` v1.2.0's `Object` has no server-side-apply and no fieldManager** — spec is only `connectionDetails`, `deletionPolicy`, `forProvider`, `managementPolicies`, `providerConfigRef`, `readiness`, `references`, `watch`, `writeConnectionSecretToRef`. Two Objects on one cluster would each rewrite `spec.users` to their own entry and fight. Merge semantics are necessary but not sufficient — the applier must speak SSA.
 
-### Finding 2 — that array cannot be shared between claims
+### CloudNativePG solves the database half — and only that half
 
-`PerconaPGCluster.spec.users` does declare `x-kubernetes-list-type: map` with `x-kubernetes-list-map-keys: ["name"]`, so in principle several field managers could each own their own entry.
+CNPG 1.25.0 ships `databases.postgresql.cnpg.io`, required fields `cluster, name, owner`. That looks like the answer, and the first revision of this document treated it as one.
 
-But **`provider-kubernetes` v1.2.0's `Object` has no server-side-apply support** — its entire spec surface is `connectionDetails`, `deletionPolicy`, `forProvider`, `managementPolicies`, `providerConfigRef`, `readiness`, `references`, `watch`, `writeConnectionSecretToRef`. It applies whole manifests, so two Objects pointed at one `PerconaPGCluster` would each rewrite `spec.users` down to only their own entry and fight indefinitely.
+It is not, for three reasons found on closer inspection:
 
-Merge semantics are necessary but not sufficient: the applier must speak SSA, and this one does not. **On Percona, the shared model needs either a custom controller or a third-party SQL provider.**
-
-### Finding 3 — CloudNativePG already has exactly this primitive
-
-CloudNativePG ships `databases.postgresql.cnpg.io`, whose spec requires precisely three fields:
-
-```
-required: [cluster, name, owner]
-```
-
-*"Create database `name`, owned by `owner`, on cluster `cluster`."* Plus `ensure: present|absent`, `databaseReclaimPolicy` for end-of-life behaviour, `connectionLimit`, `allowConnections`, encoding and locale.
-
-**This is the operator-reads-the-request model, natively.** No custom controller, no SQL provider holding superuser credentials, no server-side-apply problem — because each request is its own object rather than an entry in a shared array.
-
-CNPG also ships `Pooler` (pgBouncer), `ScheduledBackup`, `Backup`, `Publication` and `Subscription`.
-
-## The consequence: promote CNPG, retire Percona PG
-
-The existing `tera-cnpg-cluster` has been running **571 days, 3 instances, "Cluster in healthy state"** — the oldest and healthiest Postgres on the platform. It has been mentally filed as legacy to be retired.
-
-**That is backwards.** CloudNativePG is the operator with the right model, a CNCF project with a strong maintenance record, first-class object-store backups via Barman, and a per-database CRD that Percona simply does not have. Percona PG is the one that should go.
-
-This is the single biggest decision in this design, and it was not the expected outcome — the investigation was scoped as "how do we make Percona do shared databases" and the honest answer turned out to be "use the operator that already does".
-
-Percona's MongoDB and MySQL operators are unaffected and stay.
-
-## Design
-
-```text
-  app namespace                       cnpg namespace
-  ┌─────────────────────────┐         ┌────────────────────────────────┐
-  │ PostgreSQLInstance      │         │ Cluster "mimir-postgres"       │
-  │   databaseName: forgejo │         │   - N instances                │
-  └───────────┬─────────────┘         │   - Pooler (pgBouncer)         │
-              │ composed into          │   - ScheduledBackup (later)   │
-              ▼                        └───────────────┬────────────────┘
-  ┌─────────────────────────┐  cluster: mimir-postgres  │
-  │ Database (cnpg)         │───────────────────────────┘
-  │   name: forgejo         │      operator does CREATE DATABASE
-  │   owner: forgejo        │
-  └───────────┬─────────────┘
-              │
-              ▼
-  ┌─────────────────────────┐
-  │ Secret in app namespace │  host = pooler svc, db/user = forgejo
-  └─────────────────────────┘
-```
-
-**The shared cluster** is one CNPG `Cluster` owned by Mimir and declared in its own manifests — not composed per claim. It absorbs the resources three separate clusters used to hold, which is a net reduction rather than a like-for-like move.
-
-**The claim composition** stops creating a cluster. It composes a CNPG `Database` naming the shared cluster, a role for the owner, and a `Secret` projected into the claiming namespace carrying host, port, database, user and password. Each claim owns its own `Database` object, so there is no shared mutable array and no contention.
-
-**Connections** go through the shared `Pooler`. Worth noting for whichever pooler ends up in front: the Percona-generated pgBouncer config uses a wildcard route (`* = host=<primary>`) with `auth_query` resolved live against the database, so a pooler does not need to be told about individual tenant databases — routing and auth work as soon as the database and role exist.
-
-### Alternatives considered
-
-| Approach | Verdict |
+| Check | Result |
 |---|---|
-| **CNPG `Cluster` + per-claim `Database`** | **Chosen.** Native, no custom code, no extra credentials, proper lifecycle via `ensure`/`databaseReclaimPolicy`. |
-| Custom config operator watching claims, owning Percona's `users[]` | Correct and was the prior direction — a single writer sidesteps the SSA problem entirely. Rejected only because CNPG makes it unnecessary: this is custom code to reimplement a CRD that already exists. |
-| `provider-sql` `Database`/`Role`/`Grant` against Percona | Workable, but adds a thinner-maintained contrib provider holding superuser credentials, and diverges `spec.users` from reality. |
-| Append to `spec.users[]` via SSA | Blocked — provider-kubernetes cannot server-side-apply. |
-| Declare all databases in Mimir's values | Simple and contention-free, but retires self-service: adding a database becomes a git change to Mimir. Reasonable fallback. |
+| Is there a per-**role** CRD? | **No.** CNPG ships databases, publications, subscriptions, poolers, backups, scheduledbackups, imagecatalogs. No Role. |
+| Where do roles live? | `Cluster.spec.managed.roles` — an array with **`x-kubernetes-list-type` unset, i.e. atomic**. |
+| Does `Database` create the owner role? | **No.** `owner` "maps to the `OWNER` parameter of `CREATE DATABASE`" — the role must already exist. |
+| Does `Database` manage a credential? | **No.** Its entire spec is Postgres DDL options: `allowConnections, builtinLocale, cluster, collationVersion, connectionLimit, databaseReclaimPolicy, encoding, ensure, icuLocale, icuRules, isTemplate, locale, localeCType, localeCollate, localeProvider, name, owner, tablespace, template`. |
 
-## Forgejo as first customer
+So an app still cannot express its need in one namespaced resource. It needs a `Database` **plus** an entry appended to an array on the shared `Cluster` **plus** a Secret managed separately. And that array is **atomic**, which is strictly worse than Percona's — an atomic list cannot be merged per-entry by SSA even by an applier that supports it.
 
-Forgejo is a good proving case: it needs a real database, it is being built now, and it has no legacy data. The Forgejo day-2 design already says "Postgres — Mimir-vended via Crossplane claim", so that design does not change; it simply receives a database on the shared cluster.
+**CNPG is closer than Percona on the database axis and no better on the role axis.** It is not the out-of-the-box model.
 
-Sequence: size and stand up the shared CNPG cluster → cut the composition over → prove it with Forgejo → then rebuild keycloak, ting and harbor against it.
+### The multi-engine axis, which decides it
 
-## Rebuild, don't migrate
+CNPG is PostgreSQL only. The requirement spans Postgres, Mongo and MySQL, possibly Kafka and Valkey. Even had the `Database` CRD been everything it first appeared, it would have addressed one engine of three-to-five, while splitting the platform across two Postgres operators and forfeiting the shared observability and backup tooling that motivated choosing Percona originally.
 
-Existing consumers are rebuilt rather than migrated, on the explicit basis that nothing is live. For each: delete the claim, let its dedicated cluster tear down, re-create against the new composition, let the app re-initialise its schema.
+**Adopting CNPG would trade a whole-ecosystem story for a partial win on one engine.** That is the wrong trade, and it is why the earlier assessment's conclusion holds.
 
-Harbor went through exactly this cycle on 2026-08-17 — claim deleted, cluster and PVCs torn down, ArgoCD rebuilt it to 11 pods and 5 PVCs — so the pattern is proven before it is relied upon.
+## Where that leaves us
 
-## Deferred, with the risk stated
+No operator surveyed here provides "one namespaced resource → database + credential", for any engine. Percona has no per-database resource at all; CNPG has one that covers the database but not the role or the secret.
 
-Backups are **not** part of this design, by explicit direction, on the grounds that nothing is live and the architecture matters more right now. That is defensible, but the exposure should be recorded rather than left implicit:
+**This is why the custom-operator POC exists, and the reasoning behind it looks sound.** A small controller that watches one request CR per app namespace and reconciles database + role + grants + Secret against a shared cluster:
 
-- Percona's pgBackRest currently writes to **`repo1`, a 1Gi local PVC** — no offsite copy. Verified live.
-- **Velero's BackupStorageLocation has been `Unavailable` for 149 days**; it was never finished on either environment.
-- **Two PVCs were lost in a single node roll on 2026-08-14** — OpenBao's (unrecoverable, forced a full re-init) and Harbor's Postgres. Not hypothetical: it happened twice this week.
+- is a **single writer**, which dissolves the array-contention problem entirely regardless of which operator's arrays it touches — atomic or not;
+- can present **one consistent request API across engines**, which no upstream operator does;
+- keeps Percona as the substrate, preserving the multi-engine, observability and backup rationale;
+- is genuinely small — the hard part is the reconcile loop's idempotency, not the SQL.
 
-Consolidating **concentrates** that exposure — today a lost PVC costs one app its database; afterwards it costs all of them. Fair while nothing is live, and it becomes the strongest argument for finishing Mimir Phase 2 before anything real lands. **Forgejo becoming load-bearing for GitOps is precisely that moment**, since a Forgejo outage takes GitOps with it.
-
-Choosing CNPG helps here too: Barman object-store backup is native and considerably better-trodden than the Percona path, so Phase 2 gets easier rather than harder.
-
-Percona's own resiliency behaviour has never been inspected; that todo is superseded for Postgres if Percona PG retires, but still stands for MongoDB and MySQL.
-
-## Follow-ups
-
-- Move the XRD from `database.example.org` to `mimir.siliconsaga.org`, matching `xkafkaclusters` and `xvalkeyclusters`.
-- Retitle the docs: "Requesting a PostgreSQL Database" currently describes provisioning a cluster.
-- Retire the Percona PG operator once its three consumers are rebuilt on CNPG. Keep PSMDB and PXC.
-- Fold the bundled Postgres instances (Gitea, Artifactory, Backstage, Nautobot, Sonar) onto the shared cluster where the chart supports an external database. Gitea's is the one that matters, since Forgejo replaces it.
-- Consider the same shared-instance treatment for MongoDB and MySQL — but check first whether their operators have a per-database primitive, because that is what decided this one.
+The first revision of this document dismissed that idea as "custom code reimplementing a CRD that already exists". **That dismissal was based on a CRD that does not, in fact, do the job.**
 
 ## Open questions
 
-1. **Shared cluster sizing.** Three dedicated clusters request 100m/256Mi each for their instance. The shared one needs headroom for the sum of tenants plus connection overhead, not simply one instance's worth. Settle against measured p95 in the plan.
-2. **Reuse `tera-cnpg-cluster` or stand up a fresh one?** It is healthy and 571 days old, but it is named for a specific consumer and its provenance predates this design. Leaning towards a fresh, properly named cluster so the shared one is deliberate rather than inherited.
-3. **Namespace.** `mimir` alongside the vending layer, or a dedicated `postgres`/`cnpg` namespace?
-4. **Tenant isolation.** Postgres lets any role connect to any database by default. `REVOKE CONNECT ON DATABASE ... FROM PUBLIC` needs to be part of the composition rather than left to convention — check whether CNPG's `Database` exposes this or whether it needs a follow-on step.
-5. **Version.** Existing clusters are PostgreSQL 15. Pick the shared cluster's major version deliberately, since moving it later affects every tenant at once.
+1. **Does the earlier POC still exist,** and how far did it get? That should be recovered before anything is re-derived.
+2. **Which engines does v1 cover?** Postgres alone is enough to unblock Forgejo; Mongo and MySQL can follow the same shape.
+3. **Where does the operator run and what credentials does it hold?** It needs admin access to each shared cluster, which is the main security surface to design deliberately.
+4. **Shared cluster sizing**, once the provisioning mechanism is settled — three dedicated clusters request 100m/256Mi each; the shared one needs headroom for the sum of tenants plus connection overhead.
+5. **Tenant isolation.** Postgres lets any role connect to any database by default; `REVOKE CONNECT ON DATABASE … FROM PUBLIC` has to be part of the reconcile, not left to convention.
+6. **Move the XRD off `database.example.org`** to `mimir.siliconsaga.org` regardless of which path is taken.
+
+## Deferred, with the risk stated
+
+Backups remain out of scope by direction, on the basis that nothing is live. Recorded precisely rather than implied:
+
+- Percona's pgBackRest writes to **`repo1`, a 1Gi local PVC** — no offsite copy. Verified live.
+- **Velero's BackupStorageLocation has been `Unavailable` for 149 days**, never finished on either environment.
+- **Two PVCs were lost in a single node roll on 2026-08-14** — OpenBao's, unrecoverable, forcing a full re-init; and Harbor's Postgres. Not hypothetical.
+
+Consolidating onto one cluster **concentrates** that exposure: a lost PVC costs one app its database today, and all of them afterwards. Fair while nothing is live, and it is the strongest argument for finishing Mimir Phase 2 before Forgejo becomes load-bearing for GitOps.
+
+## A note on how the first revision went wrong
+
+Worth recording, because the same trap reportedly caught the original Mimir design.
+
+The CNPG `Database` CRD was found, its name and required fields (`cluster, name, owner`) read as exactly the desired model, and it was written up as "the operator-reads-the-request model, natively" — a strong claim, on the strength of a CRD's existence and schema. What was **not** checked before recommending it: whether the owner role is created or merely referenced, whether any credential is managed, whether roles have their own resource, and how any of it interacts with the multi-engine requirement that drove the original operator choice.
+
+The schema was real. The conclusion drawn from it was not supported by it.
