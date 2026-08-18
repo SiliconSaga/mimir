@@ -41,6 +41,18 @@ spec:
                   kubernetesConfig:
                     image: valkey/valkey:8.0
                     imagePullPolicy: IfNotPresent
+                    # Without these the pods are BestEffort, and BestEffort plus a
+                    # health probe is a restart loop under contention: the four
+                    # Valkey pods on this cluster accumulated 1296 restarts between
+                    # them while each used under 10m. Sized from that measurement,
+                    # with headroom rather than at the observed value.
+                    resources:
+                      requests:
+                        cpu: 25m
+                        memory: 64Mi
+                      limits:
+                        cpu: 250m
+                        memory: 256Mi
                   redisExporter:
                     enabled: false
                     image: quay.io/opstree/redis-exporter:v1.44.0
