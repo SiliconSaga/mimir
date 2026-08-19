@@ -1,0 +1,110 @@
+# Build and publish the DataService operator image.
+#
+# Path-filtered: Mimir holds far more than the operator, and a Composition edit
+# should not rebuild a Go binary. Pull requests test but do not publish.
+name: operator
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'operator/**'
+      - '.github/workflows/operator.yml'
+  pull_request:
+    paths:
+      - 'operator/**'
+      - '.github/workflows/operator.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+defaults:
+  run:
+    working-directory: operator
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: operator/go.mod
+          cache-dependency-path: operator/go.sum
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./... -count=1
+
+      # The Deployment pins a tag that this workflow is responsible for
+      # publishing. If the two drift, ArgoCD syncs a tag nobody built and the
+      # rollout fails with ImagePullBackOff long after the commit that caused
+      # it — so catch the drift here instead.
+      - name: image tag matches VERSION
+        run: |
+          version="$(cat VERSION)"
+          pinned="$(grep -oP 'image: ghcr\.io/siliconsaga/mimir-dataservice:\K.*' config/deploy/operator.yaml)"
+          echo "VERSION=$version  deployment=$pinned"
+          test "$version" = "$pinned"
+
+      # controller-gen output is committed so ArgoCD can apply it directly.
+      # Regenerate and diff: a hand-edited CRD that no longer matches the Go
+      # types is the failure mode this guards against.
+      - name: generated manifests are current
+        run: |
+          go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.16.5 \
+            object paths=./api/v1alpha1/...
+          go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.16.5 \
+            crd:generateEmbeddedObjectMeta=false paths=./api/v1alpha1/... \
+            output:crd:artifacts:config=config/crd
+          go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.16.5 \
+            rbac:roleName=mimir-dataservice paths=./internal/controller/... \
+            output:rbac:artifacts:config=config/rbac
+          git diff --exit-code -- api config
+
+  build:
+    needs: test
+    # Only publish from main. A PR build proves the Dockerfile works without
+    # putting an unreviewed image behind a tag the cluster might pull.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: read version
+        id: version
+        run: echo "value=$(cat VERSION)" >> "$GITHUB_OUTPUT"
+
+      # buildx with the docker-container driver is required for cache-to
+      # type=gha; the default docker driver has no cache exporter.
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/siliconsaga/mimir-dataservice
+          # The sha tag is the immutable one. Pre-1.0 the version tag is
+          # republished in place on every operator change, which is why the
+          # sha exists: it is what to pin when a rollback has to be exact.
+          tags: |
+            type=sha,format=long
+            type=raw,value=${{ steps.version.outputs.value }}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: operator
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

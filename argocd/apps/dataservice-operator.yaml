@@ -1,0 +1,32 @@
+# ArgoCD Application for the DataService operator.
+#
+# A child Application rather than more resources in argocd/kustomization.yaml:
+# this piece has its own release cadence — an image built by
+# .github/workflows/operator.yml — and its own health, so a failed operator
+# rollout does not mark the whole Mimir layer degraded.
+#
+# Deliberately does NOT include the shared clusters. See shared-clusters.yaml:
+# prune here must never be able to reach a database.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: mimir-dataservice-operator
+  namespace: argo
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: 'http://gitea-http.gitea.svc.cluster.local:3000/nordri-admin/mimir.git'
+    targetRevision: HEAD
+    path: operator/config
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: mimir
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

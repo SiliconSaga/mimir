@@ -81,6 +81,17 @@ Shared clusters are supplied by environment rather than discovered, so the opera
 
 An engine with no `HOST` set is simply not configured, and `shared` requests for it report `ClusterNotFound` rather than crashing the operator.
 
+## Deployment
+
+Two ArgoCD Applications, both registered in `argocd/kustomization.yaml`:
+
+| Application | Path | Prune |
+|---|---|---|
+| `mimir-dataservice-operator` | `operator/config` | yes |
+| `mimir-shared-clusters` | `shared` | **no** |
+
+They are split so that pruning the operator can never reach a database. Under `prune: true`, deleting or renaming a file in `shared/` would delete a running cluster — and after consolidation that is not one app's data, it is every tenant's. `selfHeal` stays on for both, since correcting drift on an existing cluster is safe.
+
 ## Developing
 
 ```bash
@@ -94,6 +105,22 @@ controller-gen rbac:roleName=mimir-dataservice paths=./internal/controller/... o
 ```
 
 Written against controller-runtime directly rather than scaffolded with the kubebuilder CLI, which is awkward on Windows. The layout is the same one kubebuilder produces; `controller-gen` does the generation and works fine.
+
+Generated output is **committed**, because ArgoCD applies `config/` directly and has no generation step. CI regenerates and diffs, so a hand-edited CRD that no longer matches the Go types fails the build rather than reaching the cluster.
+
+## Building and releasing
+
+`.github/workflows/operator.yml` builds `ghcr.io/siliconsaga/mimir-dataservice` on any push to `main` touching `operator/**`. Pull requests run the tests but publish nothing.
+
+Three tags are pushed: the commit SHA, the contents of `VERSION`, and `latest`. **The SHA tag is the immutable one.** Pre-1.0 the version tag is republished in place whenever the operator changes, so it identifies a line of development rather than a fixed artifact — pin a SHA when a rollback has to be exact.
+
+`config/deploy/operator.yaml` pins the `VERSION` tag, and CI fails if the two disagree. Releasing is therefore one commit that bumps both: the workflow publishes the new tag, ArgoCD sees the changed manifest, and the rollout happens because the *manifest* moved rather than because a tag quietly did.
+
+```bash
+docker build -t ghcr.io/siliconsaga/mimir-dataservice:dev .   # local check
+```
+
+The runtime image is `distroless/static:nonroot` — no shell, no package manager. `kubectl exec` into it will not work, which is intentional; diagnose from logs, events and `status.conditions`.
 
 ## Known gaps
 
