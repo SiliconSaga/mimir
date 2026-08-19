@@ -1,0 +1,17 @@
+apiVersion: mimir.siliconsaga.org/v1alpha1
+kind: DataService
+metadata:
+  name: tenant-a
+spec:
+  engine: postgres
+  placement: shared
+  databaseName: tenant_a
+---
+apiVersion: mimir.siliconsaga.org/v1alpha1
+kind: DataService
+metadata:
+  name: tenant-b
+spec:
+  engine: postgres
+  placement: shared
+  databaseName: tenant_b

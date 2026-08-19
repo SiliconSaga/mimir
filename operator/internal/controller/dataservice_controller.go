@@ -33,9 +33,13 @@ const (
 // administer it. Supplied by configuration rather than discovered, so the
 // operator has no opinion about how the cluster itself is deployed.
 type SharedCluster struct {
-	// Host and Port consumers connect to.
+	// Host and Port consumers connect to — the pooler where one exists.
 	Host string
 	Port int32
+	// AdminHost and AdminPort are where DDL runs: the primary. A pooler in
+	// transaction mode cannot carry CREATE DATABASE.
+	AdminHost string
+	AdminPort int32
 	// AdminSecret is the Secret holding admin credentials, and the keys within it.
 	AdminSecretName      string
 	AdminSecretNamespace string
@@ -225,6 +229,8 @@ func (r *DataServiceReconciler) resolveTarget(ctx context.Context, s SharedClust
 	return engine.Target{
 		Host:          s.Host,
 		Port:          s.Port,
+		AdminHost:     s.AdminHost,
+		AdminPort:     s.AdminPort,
 		AdminUser:     string(user),
 		AdminPassword: string(pass),
 		AdminDatabase: s.AdminDatabase,

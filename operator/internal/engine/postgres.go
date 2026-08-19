@@ -171,6 +171,9 @@ func (p Postgres) Drop(ctx context.Context, t Target, database string) error {
 	return nil
 }
 
+// connect opens an ADMIN connection, always against the primary rather than
+// the pooler: CREATE DATABASE cannot run inside a transaction block, and a
+// pooler in transaction mode wraps every statement in one.
 func (Postgres) connect(ctx context.Context, t Target, database string) (*pgx.Conn, error) {
 	sslmode := "disable"
 	if t.TLS {
@@ -181,13 +184,13 @@ func (Postgres) connect(ctx context.Context, t Target, database string) (*pgx.Co
 	}
 	dsn := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
 		url.QueryEscape(t.AdminUser), url.QueryEscape(t.AdminPassword),
-		t.Host, t.Port, url.PathEscape(database), sslmode)
+		t.AdminHost, t.AdminPort, url.PathEscape(database), sslmode)
 
 	conn, err := pgx.Connect(ctx, dsn)
 	if err != nil {
 		// The DSN carries the admin password, so it must never reach an error
 		// message that lands in a log or a status condition.
-		return nil, fmt.Errorf("connect to %s:%d/%s as %s: %w", t.Host, t.Port, database, t.AdminUser, err)
+		return nil, fmt.Errorf("connect to %s:%d/%s as %s: %w", t.AdminHost, t.AdminPort, database, t.AdminUser, err)
 	}
 	return conn, nil
 }

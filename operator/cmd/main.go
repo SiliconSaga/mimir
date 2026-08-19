@@ -107,8 +107,10 @@ func main() {
 //
 // For engine "postgres" the variables are:
 //
-//	MIMIR_POSTGRES_HOST                  required
+//	MIMIR_POSTGRES_HOST                  required — what consumers connect to
 //	MIMIR_POSTGRES_PORT                  default 5432
+//	MIMIR_POSTGRES_ADMIN_HOST            default = HOST — where DDL runs
+//	MIMIR_POSTGRES_ADMIN_PORT            default = PORT
 //	MIMIR_POSTGRES_ADMIN_SECRET          required, "namespace/name"
 //	MIMIR_POSTGRES_ADMIN_USER_KEY        default "user"
 //	MIMIR_POSTGRES_ADMIN_PASSWORD_KEY    default "password"
@@ -153,9 +155,23 @@ func sharedClustersFromEnv() (map[mimirv1alpha1.Engine]controller.SharedCluster,
 			tls = t
 		}
 
+		// Admin traffic defaults to the consumer host when not set separately,
+		// which is correct for engines with no pooler in front.
+		adminHost := envOr(prefix+"ADMIN_HOST", host)
+		adminPort := port
+		if raw := os.Getenv(prefix + "ADMIN_PORT"); raw != "" {
+			p, err := strconv.ParseInt(raw, 10, 32)
+			if err != nil {
+				return nil, fmt.Errorf("%sADMIN_PORT: %w", prefix, err)
+			}
+			adminPort = int32(p)
+		}
+
 		out[e] = controller.SharedCluster{
 			Host:                 host,
 			Port:                 port,
+			AdminHost:            adminHost,
+			AdminPort:            adminPort,
 			AdminSecretNamespace: ns,
 			AdminSecretName:      name,
 			AdminUserKey:         envOr(prefix+"ADMIN_USER_KEY", "user"),

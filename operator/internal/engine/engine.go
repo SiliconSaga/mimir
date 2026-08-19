@@ -12,11 +12,19 @@ import (
 )
 
 // Target describes the server a database is being vended inside.
+//
+// Admin and consumer endpoints are deliberately separate. DDL such as
+// CREATE DATABASE cannot run inside a transaction block, so it must reach the
+// primary directly — a pooler in transaction mode rejects it. Consumers are
+// handed the pooler, which is the whole reason one is deployed.
 type Target struct {
-	// Host and Port are what consumers connect to — the pooler where one
-	// exists, since that is what the credentials are valid against.
+	// Host and Port are what CONSUMERS connect to — the pooler where one exists.
 	Host string
 	Port int32
+
+	// AdminHost and AdminPort are where DDL runs: the primary, not the pooler.
+	AdminHost string
+	AdminPort int32
 
 	// AdminUser and AdminPassword can create databases and roles.
 	AdminUser     string

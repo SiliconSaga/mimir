@@ -1,0 +1,101 @@
+# The shared PostgreSQL cluster.
+#
+# One cluster, many databases — vended by the DataService operator rather than
+# by a claim per app. See docs/plans/2026-08-17-dataservice-vending-design.md.
+#
+# Declared as a plain manifest rather than composed from a claim: it is
+# infrastructure the platform owns, not something an app requests. A claim
+# would imply it could be provisioned more than once, which is exactly the
+# cluster-per-app model this replaces.
+apiVersion: pgv2.percona.com/v2
+kind: PerconaPGCluster
+metadata:
+  name: mimir-postgres
+  namespace: mimir
+spec:
+  image: "percona/percona-postgresql-operator:2.7.0-ppg15-postgres"
+  imagePullPolicy: Always
+  # Pinned at 15 to match every existing cluster, so the eventual rebuild of
+  # keycloak/ting/harbor onto this one is not also a major-version migration.
+  # A shared cluster serves one version for all tenants, which is why
+  # spec.version on a DataService is rejected under placement: shared.
+  postgresVersion: 15
+
+  instances:
+    - name: instance1
+      replicas: 1
+      # Sized for the sum of its tenants plus connection overhead, not for one
+      # of the clusters it replaces. Measured p95 of the three existing
+      # single-tenant clusters: keycloak 77m/418Mi, ting 70m/336Mi,
+      # harbor 60m/487Mi. Forgejo is the fourth.
+      resources:
+        requests:
+          cpu: 250m
+          memory: 1Gi
+        limits:
+          cpu: "1"
+          memory: 2Gi
+      dataVolumeClaimSpec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 20Gi
+      initContainer:
+        image: percona/percona-postgresql-operator:2.7.0
+        containerSecurityContext:
+          runAsNonRoot: false
+
+  backups:
+    enabled: true
+    pgbackrest:
+      image: "percona/percona-postgresql-operator:2.7.0-ppg15-postgres"
+      # Requests here for the same reason as everywhere else on this cluster:
+      # BestEffort plus a health probe is a restart loop under contention, and
+      # this is the pod holding the backups.
+      repoHost:
+        resources:
+          requests:
+            cpu: 25m
+            memory: 64Mi
+          limits:
+            cpu: 250m
+            memory: 256Mi
+      repos:
+        - name: repo1
+          volume:
+            volumeClaimSpec:
+              accessModes:
+                - ReadWriteOnce
+              resources:
+                requests:
+                  storage: 10Gi
+      # NOTE: repo1 is a LOCAL PVC. There is no offsite copy, so this survives
+      # a pod restart but not the loss of the cluster. Deliberate for now and
+      # recorded rather than implied — see the design's "Deferred, with the
+      # risk stated". Consolidating concentrates that exposure: what used to
+      # cost one app its database now costs all of them. Mimir Phase 2 (an S3
+      # repo2 against Garage) is the fix, and Forgejo becoming load-bearing
+      # for GitOps is the moment it stops being optional.
+
+  proxy:
+    pgBouncer:
+      replicas: 1
+      image: "percona/percona-postgresql-operator:2.6.0-ppg15-pgbouncer"
+      resources:
+        requests:
+          cpu: 50m
+          memory: 128Mi
+        limits:
+          cpu: 250m
+          memory: 256Mi
+
+  users:
+    # The superuser the operator authenticates as to create databases and
+    # roles. Percona publishes its credentials to a Secret named
+    # <cluster>-pguser-<name>, which is what MIMIR_POSTGRES_ADMIN_SECRET points
+    # at. Tenant databases are NOT declared here — that is the operator's job,
+    # and listing them here is the shared-array contention the design rejected.
+    - name: postgres
+      databases:
+        - postgres
