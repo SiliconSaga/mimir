@@ -1,0 +1,43 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mimir-dataservice
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - create
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - mimir.siliconsaga.org
+  resources:
+  - dataservices
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - mimir.siliconsaga.org
+  resources:
+  - dataservices/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - mimir.siliconsaga.org
+  resources:
+  - dataservices/status
+  verbs:
+  - get
+  - patch
+  - update

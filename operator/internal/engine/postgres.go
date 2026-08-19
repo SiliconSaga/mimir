@@ -1,0 +1,249 @@
+package engine
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"fmt"
+	"net/url"
+	"strings"
+
+	"github.com/jackc/pgx/v5"
+
+	mimirv1alpha1 "github.com/SiliconSaga/mimir/operator/api/v1alpha1"
+)
+
+// Postgres vends a database + owning role inside an existing PostgreSQL server.
+type Postgres struct{}
+
+func (Postgres) Engine() mimirv1alpha1.Engine { return mimirv1alpha1.EnginePostgres }
+
+// Ensure creates the role and database if absent, fixes ownership and grants,
+// and revokes PUBLIC's default ability to connect.
+//
+// That last part is not optional. PostgreSQL lets ANY role connect to ANY
+// database by default, so without the revoke a shared cluster is shared data —
+// every tenant could read every other tenant's database. It is the difference
+// between multi-tenant and merely co-located.
+func (p Postgres) Ensure(ctx context.Context, t Target, database, current string, opts Options) (Credentials, error) {
+	var creds Credentials
+
+	if err := validateIdentifier(database); err != nil {
+		return creds, err
+	}
+	role := database
+
+	password := current
+	if password == "" {
+		var err error
+		if password, err = generatePassword(); err != nil {
+			return creds, fmt.Errorf("generate password: %w", err)
+		}
+	}
+
+	conn, err := p.connect(ctx, t, t.AdminDatabase)
+	if err != nil {
+		return creds, err
+	}
+	defer func() { _ = conn.Close(ctx) }()
+
+	// Role first: CREATE DATABASE ... OWNER requires the role to exist.
+	//
+	// CREATE ROLE has no IF NOT EXISTS, so existence is checked separately.
+	// The password is set on every reconcile, not just at creation, so that the
+	// Secret and the server cannot drift apart — if someone rotates the Secret,
+	// the next reconcile makes the server agree.
+	var roleExists bool
+	if err := conn.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)`, role,
+	).Scan(&roleExists); err != nil {
+		return creds, fmt.Errorf("check role %q: %w", role, err)
+	}
+
+	// Identifiers cannot be parameterised, so they are quoted rather than
+	// interpolated raw; validateIdentifier above is the belt to this braces.
+	qRole := quoteIdentifier(role)
+	qDB := quoteIdentifier(database)
+
+	if !roleExists {
+		if _, err := conn.Exec(ctx,
+			fmt.Sprintf("CREATE ROLE %s WITH LOGIN PASSWORD %s", qRole, quoteLiteral(password)),
+		); err != nil {
+			return creds, fmt.Errorf("create role %q: %w", role, err)
+		}
+	} else {
+		if _, err := conn.Exec(ctx,
+			fmt.Sprintf("ALTER ROLE %s WITH LOGIN PASSWORD %s", qRole, quoteLiteral(password)),
+		); err != nil {
+			return creds, fmt.Errorf("set password for role %q: %w", role, err)
+		}
+	}
+
+	var dbExists bool
+	if err := conn.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)`, database,
+	).Scan(&dbExists); err != nil {
+		return creds, fmt.Errorf("check database %q: %w", database, err)
+	}
+	if !dbExists {
+		if _, err := conn.Exec(ctx,
+			fmt.Sprintf("CREATE DATABASE %s OWNER %s", qDB, qRole),
+		); err != nil {
+			return creds, fmt.Errorf("create database %q: %w", database, err)
+		}
+	}
+
+	// Tenant isolation. REVOKE ... FROM PUBLIC is what stops every other role
+	// on the shared cluster from connecting to this database.
+	if _, err := conn.Exec(ctx,
+		fmt.Sprintf("REVOKE CONNECT ON DATABASE %s FROM PUBLIC", qDB),
+	); err != nil {
+		return creds, fmt.Errorf("revoke public connect on %q: %w", database, err)
+	}
+	if _, err := conn.Exec(ctx,
+		fmt.Sprintf("GRANT ALL PRIVILEGES ON DATABASE %s TO %s", qDB, qRole),
+	); err != nil {
+		return creds, fmt.Errorf("grant on %q: %w", database, err)
+	}
+
+	if len(opts.Extensions) > 0 {
+		if err := p.ensureExtensions(ctx, t, database, opts.Extensions); err != nil {
+			return creds, err
+		}
+	}
+
+	return Credentials{
+		Host:     t.Host,
+		Port:     t.Port,
+		Database: database,
+		Username: role,
+		Password: password,
+		URI:      postgresURI(t, database, role, password),
+	}, nil
+}
+
+// ensureExtensions connects to the tenant database itself — CREATE EXTENSION
+// is per-database, so it cannot be run from the admin database.
+func (p Postgres) ensureExtensions(ctx context.Context, t Target, database string, exts []string) error {
+	conn, err := p.connect(ctx, t, database)
+	if err != nil {
+		return fmt.Errorf("connect to %q for extensions: %w", database, err)
+	}
+	defer func() { _ = conn.Close(ctx) }()
+
+	for _, ext := range exts {
+		if err := validateIdentifier(ext); err != nil {
+			return fmt.Errorf("extension name %q: %w", ext, err)
+		}
+		if _, err := conn.Exec(ctx,
+			fmt.Sprintf("CREATE EXTENSION IF NOT EXISTS %s", quoteIdentifier(ext)),
+		); err != nil {
+			return fmt.Errorf("create extension %q in %q: %w", ext, database, err)
+		}
+	}
+	return nil
+}
+
+// Drop removes the database and its role.
+func (p Postgres) Drop(ctx context.Context, t Target, database string) error {
+	if err := validateIdentifier(database); err != nil {
+		return err
+	}
+	conn, err := p.connect(ctx, t, t.AdminDatabase)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Close(ctx) }()
+
+	// WITH (FORCE) terminates existing sessions. Without it a single idle
+	// client holds the drop open indefinitely and deletion hangs on a
+	// finalizer with no obvious cause.
+	if _, err := conn.Exec(ctx,
+		fmt.Sprintf("DROP DATABASE IF EXISTS %s WITH (FORCE)", quoteIdentifier(database)),
+	); err != nil {
+		return fmt.Errorf("drop database %q: %w", database, err)
+	}
+	if _, err := conn.Exec(ctx,
+		fmt.Sprintf("DROP ROLE IF EXISTS %s", quoteIdentifier(database)),
+	); err != nil {
+		return fmt.Errorf("drop role %q: %w", database, err)
+	}
+	return nil
+}
+
+func (Postgres) connect(ctx context.Context, t Target, database string) (*pgx.Conn, error) {
+	sslmode := "disable"
+	if t.TLS {
+		// require, not verify-full: the server cert is issued by the operator's
+		// own internal CA, which this client does not carry. The transport is
+		// encrypted; the identity check is a hardening follow-up.
+		sslmode = "require"
+	}
+	dsn := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
+		url.QueryEscape(t.AdminUser), url.QueryEscape(t.AdminPassword),
+		t.Host, t.Port, url.PathEscape(database), sslmode)
+
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		// The DSN carries the admin password, so it must never reach an error
+		// message that lands in a log or a status condition.
+		return nil, fmt.Errorf("connect to %s:%d/%s as %s: %w", t.Host, t.Port, database, t.AdminUser, err)
+	}
+	return conn, nil
+}
+
+func postgresURI(t Target, database, user, password string) string {
+	sslmode := "disable"
+	if t.TLS {
+		sslmode = "require"
+	}
+	return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
+		url.QueryEscape(user), url.QueryEscape(password),
+		t.Host, t.Port, url.PathEscape(database), sslmode)
+}
+
+// validateIdentifier rejects anything that is not a plain lower-case SQL
+// identifier. The CRD pattern already enforces this for databaseName, but
+// extensions and any future caller arrive unchecked, and these strings are
+// interpolated into DDL.
+func validateIdentifier(s string) error {
+	if s == "" {
+		return fmt.Errorf("identifier must not be empty")
+	}
+	if len(s) > 63 {
+		return fmt.Errorf("identifier %q exceeds 63 characters", s)
+	}
+	for i, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r == '_':
+		case r >= '0' && r <= '9' && i > 0:
+		default:
+			return fmt.Errorf("identifier %q contains an illegal character %q", s, r)
+		}
+	}
+	return nil
+}
+
+// quoteIdentifier double-quotes an identifier, doubling any embedded quote.
+// validateIdentifier makes that impossible today; this stays correct anyway so
+// the two are not coupled.
+func quoteIdentifier(s string) string {
+	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+}
+
+// quoteLiteral single-quotes a string literal, doubling embedded quotes.
+// Passwords are generated here and base64url-encoded, so they contain no
+// quotes — but a literal built by concatenation is exactly where that
+// assumption stops being true later.
+func quoteLiteral(s string) string {
+	return `'` + strings.ReplaceAll(s, `'`, `''`) + `'`
+}
+
+func generatePassword() (string, error) {
+	buf := make([]byte, 24)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	// base64url avoids the +/= that need escaping in a connection URI.
+	return base64.RawURLEncoding.EncodeToString(buf), nil
+}
