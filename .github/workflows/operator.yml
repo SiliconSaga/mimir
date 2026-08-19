@@ -27,6 +27,21 @@ defaults:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # A real PostgreSQL for the integration tests. Tenant isolation is a
+    # property of the server's grant model, not of our code, so asserting it
+    # without a server would only be testing our own assumptions.
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: testadminpw
+        ports:
+          - 15432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -39,6 +54,13 @@ jobs:
 
       - name: go test
         run: go test ./... -count=1
+
+      # Behind a build tag and skipped without MIMIR_TEST_PG, so the plain
+      # `go test ./...` above stays hermetic.
+      - name: integration tests
+        env:
+          MIMIR_TEST_PG: localhost:15432
+        run: go test -tags integration ./internal/engine/... -count=1 -v
 
       # The Deployment pins a tag that this workflow is responsible for
       # publishing. If the two drift, ArgoCD syncs a tag nobody built and the
