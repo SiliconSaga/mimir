@@ -7,6 +7,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	mimirv1alpha1 "github.com/SiliconSaga/mimir/operator/api/v1alpha1"
+	"github.com/SiliconSaga/mimir/operator/internal/engine"
 )
 
 func ds(spec mimirv1alpha1.DataServiceSpec) *mimirv1alpha1.DataService {
@@ -78,15 +79,73 @@ func TestExtensionsArePostgresOnly(t *testing.T) {
 	}
 }
 
-func TestResolvedDatabaseNameFallsBackToObjectName(t *testing.T) {
+// The derived name must include the namespace.
+//
+// On a per-app cluster the object's name was unique enough because the cluster
+// was too. On a shared cluster nothing else disambiguates, so falling back to
+// metadata.name alone means two DataServices called "app" in different
+// namespaces resolve to the same physical database — and the second to
+// reconcile adopts the first tenant's data.
+func TestResolvedDatabaseNameIncludesNamespace(t *testing.T) {
 	d := ds(mimirv1alpha1.DataServiceSpec{Engine: mimirv1alpha1.EnginePostgres})
-	if got := d.ResolvedDatabaseName(); got != "forgejo" {
-		t.Errorf("expected fallback to metadata.name, got %q", got)
+	got := d.ResolvedDatabaseName()
+	if !strings.Contains(got, d.Namespace) {
+		t.Errorf("derived name %q does not include namespace %q", got, d.Namespace)
 	}
 
 	d.Spec.DatabaseName = "custom_db"
 	if got := d.ResolvedDatabaseName(); got != "custom_db" {
-		t.Errorf("expected the explicit name, got %q", got)
+		t.Errorf("an explicit name must still be honoured, got %q", got)
+	}
+}
+
+func TestDerivedNamesDoNotCollideAcrossNamespaces(t *testing.T) {
+	a := mimirv1alpha1.DerivePhysicalName("team-a", "app")
+	b := mimirv1alpha1.DerivePhysicalName("team-b", "app")
+	if a == b {
+		t.Fatalf("same physical name for different namespaces: %q", a)
+	}
+
+	// Truncation must not reintroduce the collision. These two share a long
+	// prefix and differ only past the identifier length limit, which is exactly
+	// where naive truncation would fold them together.
+	long := strings.Repeat("n", 60)
+	c := mimirv1alpha1.DerivePhysicalName(long+"-one", "app")
+	d := mimirv1alpha1.DerivePhysicalName(long+"-two", "app")
+	if c == d {
+		t.Fatalf("truncation collapsed two distinct namespaces into %q", c)
+	}
+	for _, got := range []string{a, b, c, d} {
+		if err := engine.ValidateIdentifier(got); err != nil {
+			t.Errorf("derived name %q is not a usable identifier: %v", got, err)
+		}
+	}
+}
+
+// Kubernetes names are DNS labels and may start with a digit or contain
+// hyphens; SQL identifiers allow neither unquoted.
+func TestDerivedNamesAreSQLSafe(t *testing.T) {
+	for _, tc := range []struct{ ns, name string }{
+		{"9team", "app"},
+		{"team-a", "my-app"},
+		{"team.a", "app.v2"},
+	} {
+		got := mimirv1alpha1.DerivePhysicalName(tc.ns, tc.name)
+		if err := engine.ValidateIdentifier(got); err != nil {
+			t.Errorf("DerivePhysicalName(%q, %q) = %q: %v", tc.ns, tc.name, got, err)
+		}
+	}
+}
+
+// A derived name that the engine would reject must fail validation as
+// InvalidSpec, not surface later as a connection error pointing at the cluster.
+func TestValidateChecksTheResolvedName(t *testing.T) {
+	r := &DataServiceReconciler{}
+	d := ds(mimirv1alpha1.DataServiceSpec{Engine: mimirv1alpha1.EnginePostgres})
+	d.Namespace = "9-bad"
+	d.Name = "also-bad"
+	if err := r.validate(d); err != nil {
+		t.Fatalf("a sanitised derived name should validate, got %v", err)
 	}
 }
 

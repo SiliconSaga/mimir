@@ -12,10 +12,12 @@ import (
 	"strconv"
 	"strings"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -54,9 +56,9 @@ func main() {
 		os.Exit(1)
 	}
 	if len(shared) == 0 {
-		// Not fatal: the operator still serves dedicated placement and reports
-		// a clear condition on shared requests. Failing to start would make a
-		// config typo look like a crashloop.
+		// Not fatal: the operator still starts and reports a clear condition on
+		// every shared request. Failing to start would make a config typo look
+		// like a crashloop instead of a misconfiguration.
 		setupLog.Info("no shared clusters configured; shared placement will report ClusterNotFound")
 	}
 
@@ -69,6 +71,20 @@ func main() {
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "dataservice.mimir.siliconsaga.org",
+		Client: client.Options{
+			Cache: &client.CacheOptions{
+				// Read Secrets straight from the API server instead of through
+				// the manager's cache.
+				//
+				// The cache backs every read with an informer, which LISTs and
+				// WATCHes the whole type cluster-wide. For Secrets that means
+				// holding every credential in the cluster in memory and needing
+				// RBAC to enumerate them — for the sake of two objects: one
+				// admin Secret read by name, and one published Secret per
+				// tenant. Uncached reads let the ClusterRole drop list/watch.
+				DisableFor: []client.Object{&corev1.Secret{}},
+			},
+		},
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
@@ -139,11 +155,11 @@ func sharedClustersFromEnv() (map[mimirv1alpha1.Engine]controller.SharedCluster,
 
 		port := int32(defaultPort(e))
 		if raw := os.Getenv(prefix + "PORT"); raw != "" {
-			p, err := strconv.ParseInt(raw, 10, 32)
+			p, err := parsePort(raw)
 			if err != nil {
 				return nil, fmt.Errorf("%sPORT: %w", prefix, err)
 			}
-			port = int32(p)
+			port = p
 		}
 
 		tls := true
@@ -160,11 +176,11 @@ func sharedClustersFromEnv() (map[mimirv1alpha1.Engine]controller.SharedCluster,
 		adminHost := envOr(prefix+"ADMIN_HOST", host)
 		adminPort := port
 		if raw := os.Getenv(prefix + "ADMIN_PORT"); raw != "" {
-			p, err := strconv.ParseInt(raw, 10, 32)
+			p, err := parsePort(raw)
 			if err != nil {
 				return nil, fmt.Errorf("%sADMIN_PORT: %w", prefix, err)
 			}
-			adminPort = int32(p)
+			adminPort = p
 		}
 
 		out[e] = controller.SharedCluster{
@@ -181,6 +197,20 @@ func sharedClustersFromEnv() (map[mimirv1alpha1.Engine]controller.SharedCluster,
 		}
 	}
 	return out, nil
+}
+
+// parsePort accepts only a real TCP port. Without the range check a typo like
+// "5432 " or "54320000" becomes a silently wrong int32 and the failure surfaces
+// much later as an unexplained connection error.
+func parsePort(raw string) (int32, error) {
+	p, err := strconv.ParseInt(raw, 10, 32)
+	if err != nil {
+		return 0, err
+	}
+	if p < 1 || p > 65535 {
+		return 0, fmt.Errorf("port %d out of range 1-65535", p)
+	}
+	return int32(p), nil
 }
 
 func envOr(key, fallback string) string {

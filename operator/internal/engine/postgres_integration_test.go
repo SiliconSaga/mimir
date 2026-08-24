@@ -20,6 +20,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -119,6 +120,78 @@ func TestTenantIsolation(t *testing.T) {
 				t.Fatalf("refused, but not by the grant model — got %v", err)
 			}
 		})
+	}
+}
+
+// TestRefusesToAdoptAnotherOwnersDatabase is the guard on the collision that
+// only exists once there is more than one customer.
+//
+// Two DataServices resolving to the same physical name — different namespaces,
+// same object name, or two explicit databaseName values that happen to match —
+// must not silently share a database. Before the ownership marker the second
+// one would adopt the first's data AND reset its password, so the first tenant
+// lost access to a database the second could now read.
+func TestRefusesToAdoptAnotherOwnersDatabase(t *testing.T) {
+	tgt := testTarget(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	p := Postgres{}
+	const db = "tenant_contested"
+
+	first, err := p.Ensure(ctx, tgt, db, "", Options{Owner: "team-a/app"})
+	if err != nil {
+		t.Fatalf("provisioning for team-a: %v", err)
+	}
+	t.Cleanup(func() { _ = p.Drop(context.Background(), tgt, db) })
+
+	_, err = p.Ensure(ctx, tgt, db, "", Options{Owner: "team-b/app"})
+	if err == nil {
+		t.Fatal("OWNERSHIP FAILURE: a second DataService adopted an existing database")
+	}
+	var notOwned *ErrNotOwned
+	if !errors.As(err, &notOwned) {
+		t.Fatalf("refused, but not as an ownership conflict — got %v", err)
+	}
+
+	// The first tenant's credential must still work. A refusal that already
+	// rotated the password would be a failure wearing a success's clothes.
+	if err := connectAs(ctx, tgt, first.Username, first.Password, db); err != nil {
+		t.Fatalf("first owner locked out by the rejected second claim: %v", err)
+	}
+}
+
+// A database created by hand, with no marker, must also be left alone —
+// adopting it would hand a tenant data the operator did not create.
+func TestRefusesUnmarkedPreExistingDatabase(t *testing.T) {
+	tgt := testTarget(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	admin := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
+		tgt.AdminUser, tgt.AdminPassword, tgt.AdminHost, tgt.AdminPort, tgt.AdminDatabase)
+	conn, err := pgx.Connect(ctx, admin)
+	if err != nil {
+		t.Fatalf("admin connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	if _, err := conn.Exec(ctx, "CREATE DATABASE tenant_preexisting"); err != nil {
+		t.Fatalf("seeding a hand-made database: %v", err)
+	}
+	t.Cleanup(func() {
+		c, err := pgx.Connect(context.Background(), admin)
+		if err != nil {
+			return
+		}
+		defer c.Close(context.Background())
+		_, _ = c.Exec(context.Background(), "DROP DATABASE IF EXISTS tenant_preexisting")
+	})
+
+	_, err = Postgres{}.Ensure(ctx, tgt, "tenant_preexisting", "", Options{Owner: "team-a/app"})
+	var notOwned *ErrNotOwned
+	if !errors.As(err, &notOwned) {
+		t.Fatalf("expected an ownership conflict for an unmarked database, got %v", err)
 	}
 }
 

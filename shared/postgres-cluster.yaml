@@ -61,8 +61,21 @@ spec:
           limits:
             cpu: 250m
             memory: 256Mi
+      # Retention. Without this pgBackRest keeps every full backup until the
+      # volume fills, at which point backups start failing — the failure mode
+      # that stays invisible until a restore is attempted.
+      global:
+        repo1-retention-full: "7"
+        repo1-retention-full-type: count
       repos:
         - name: repo1
+          # Schedules are not optional here. pgBackRest takes an initial backup
+          # when the cluster is created and then, with no schedule, never takes
+          # another — so the repo would sit holding one increasingly stale copy
+          # while looking healthy.
+          schedules:
+            full: "0 1 * * 0"
+            differential: "0 1 * * 1-6"
           volume:
             volumeClaimSpec:
               accessModes:

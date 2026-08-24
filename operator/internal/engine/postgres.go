@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net/url"
+	"sort"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -28,7 +29,7 @@ func (Postgres) Engine() mimirv1alpha1.Engine { return mimirv1alpha1.EnginePostg
 func (p Postgres) Ensure(ctx context.Context, t Target, database, current string, opts Options) (Credentials, error) {
 	var creds Credentials
 
-	if err := validateIdentifier(database); err != nil {
+	if err := ValidateIdentifier(database); err != nil {
 		return creds, err
 	}
 	role := database
@@ -47,7 +48,33 @@ func (p Postgres) Ensure(ctx context.Context, t Target, database, current string
 	}
 	defer func() { _ = conn.Close(ctx) }()
 
-	// Role first: CREATE DATABASE ... OWNER requires the role to exist.
+	// Identifiers cannot be parameterised, so they are quoted rather than
+	// interpolated raw; ValidateIdentifier above is the belt to this braces.
+	qRole := quoteIdentifier(role)
+	qDB := quoteIdentifier(database)
+
+	// Ownership is checked BEFORE anything is mutated, and the order matters.
+	// Setting the role password first — as an earlier version did — would
+	// rotate another tenant's credential and only then discover the database
+	// was not ours, breaking a working service on the way to reporting a
+	// conflict.
+	var dbExists bool
+	if err := conn.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)`, database,
+	).Scan(&dbExists); err != nil {
+		return creds, fmt.Errorf("check database %q: %w", database, err)
+	}
+	if dbExists && opts.Owner != "" {
+		owner, err := p.databaseOwnerMarker(ctx, conn, database)
+		if err != nil {
+			return creds, err
+		}
+		if owner != opts.Owner {
+			return creds, &ErrNotOwned{Database: database, Want: opts.Owner, Got: owner}
+		}
+	}
+
+	// Role next: CREATE DATABASE ... OWNER requires the role to exist.
 	//
 	// CREATE ROLE has no IF NOT EXISTS, so existence is checked separately.
 	// The password is set on every reconcile, not just at creation, so that the
@@ -59,11 +86,6 @@ func (p Postgres) Ensure(ctx context.Context, t Target, database, current string
 	).Scan(&roleExists); err != nil {
 		return creds, fmt.Errorf("check role %q: %w", role, err)
 	}
-
-	// Identifiers cannot be parameterised, so they are quoted rather than
-	// interpolated raw; validateIdentifier above is the belt to this braces.
-	qRole := quoteIdentifier(role)
-	qDB := quoteIdentifier(database)
 
 	if !roleExists {
 		if _, err := conn.Exec(ctx,
@@ -79,17 +101,22 @@ func (p Postgres) Ensure(ctx context.Context, t Target, database, current string
 		}
 	}
 
-	var dbExists bool
-	if err := conn.QueryRow(ctx,
-		`SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)`, database,
-	).Scan(&dbExists); err != nil {
-		return creds, fmt.Errorf("check database %q: %w", database, err)
-	}
 	if !dbExists {
 		if _, err := conn.Exec(ctx,
 			fmt.Sprintf("CREATE DATABASE %s OWNER %s", qDB, qRole),
 		); err != nil {
 			return creds, fmt.Errorf("create database %q: %w", database, err)
+		}
+	}
+
+	// Stamp ownership. COMMENT ON DATABASE is used rather than a side table
+	// because it lives with the database itself — it cannot drift out of sync,
+	// and it survives anything short of dropping the database.
+	if opts.Owner != "" {
+		if _, err := conn.Exec(ctx,
+			fmt.Sprintf("COMMENT ON DATABASE %s IS %s", qDB, quoteLiteral(ownerMarkerPrefix+opts.Owner)),
+		); err != nil {
+			return creds, fmt.Errorf("record owner on %q: %w", database, err)
 		}
 	}
 
@@ -122,6 +149,62 @@ func (p Postgres) Ensure(ctx context.Context, t Target, database, current string
 	}, nil
 }
 
+// ownerMarkerPrefix namespaces the comment so a database that merely happens
+// to carry a human-written description is not mistaken for one of ours.
+const ownerMarkerPrefix = "mimir-dataservice:"
+
+// databaseOwnerMarker returns the owner recorded on a database, or "" when
+// there is no marker — which means it was created outside the operator.
+func (Postgres) databaseOwnerMarker(ctx context.Context, conn *pgx.Conn, database string) (string, error) {
+	var comment *string
+	if err := conn.QueryRow(ctx,
+		`SELECT shobj_description(oid, 'pg_database') FROM pg_database WHERE datname = $1`,
+		database,
+	).Scan(&comment); err != nil {
+		return "", fmt.Errorf("read owner marker on %q: %w", database, err)
+	}
+	if comment == nil {
+		return "", nil
+	}
+	if !strings.HasPrefix(*comment, ownerMarkerPrefix) {
+		return "", nil
+	}
+	return strings.TrimPrefix(*comment, ownerMarkerPrefix), nil
+}
+
+// allowedExtensions is the set a tenant may request.
+//
+// CREATE EXTENSION runs with administrative rights, and on a SHARED cluster
+// that is a privilege boundary rather than a convenience: several contrib
+// extensions can read the filesystem or execute arbitrary code as the server
+// user, which would reach every other tenant on the instance. These are the
+// ones that only affect the tenant's own database.
+var allowedExtensions = map[string]bool{
+	"btree_gin":          true,
+	"btree_gist":         true,
+	"citext":             true,
+	"hstore":             true,
+	"intarray":           true,
+	"ltree":              true,
+	"pg_stat_statements": true,
+	"pg_trgm":            true,
+	"pgcrypto":           true,
+	"unaccent":           true,
+	"uuid-ossp":          true,
+	"vector":             true,
+}
+
+// AllowedExtensions lists what a tenant may ask for, for error messages and
+// documentation. Sorted so the output is stable.
+func AllowedExtensions() []string {
+	out := make([]string, 0, len(allowedExtensions))
+	for k := range allowedExtensions {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // ensureExtensions connects to the tenant database itself — CREATE EXTENSION
 // is per-database, so it cannot be run from the admin database.
 func (p Postgres) ensureExtensions(ctx context.Context, t Target, database string, exts []string) error {
@@ -132,8 +215,13 @@ func (p Postgres) ensureExtensions(ctx context.Context, t Target, database strin
 	defer func() { _ = conn.Close(ctx) }()
 
 	for _, ext := range exts {
-		if err := validateIdentifier(ext); err != nil {
-			return fmt.Errorf("extension name %q: %w", ext, err)
+		// Exact membership of a fixed set, not a character-class check. That
+		// is strictly stronger than ValidateIdentifier, and it also admits
+		// legitimate hyphenated names like uuid-ossp that the identifier rule
+		// would have rejected outright.
+		if !allowedExtensions[ext] {
+			return fmt.Errorf("extension %q is not on the allowlist for shared clusters (allowed: %s)",
+				ext, strings.Join(AllowedExtensions(), ", "))
 		}
 		if _, err := conn.Exec(ctx,
 			fmt.Sprintf("CREATE EXTENSION IF NOT EXISTS %s", quoteIdentifier(ext)),
@@ -146,7 +234,7 @@ func (p Postgres) ensureExtensions(ctx context.Context, t Target, database strin
 
 // Drop removes the database and its role.
 func (p Postgres) Drop(ctx context.Context, t Target, database string) error {
-	if err := validateIdentifier(database); err != nil {
+	if err := ValidateIdentifier(database); err != nil {
 		return err
 	}
 	conn, err := p.connect(ctx, t, t.AdminDatabase)
@@ -205,11 +293,11 @@ func postgresURI(t Target, database, user, password string) string {
 		t.Host, t.Port, url.PathEscape(database), sslmode)
 }
 
-// validateIdentifier rejects anything that is not a plain lower-case SQL
+// ValidateIdentifier rejects anything that is not a plain lower-case SQL
 // identifier. The CRD pattern already enforces this for databaseName, but
 // extensions and any future caller arrive unchecked, and these strings are
 // interpolated into DDL.
-func validateIdentifier(s string) error {
+func ValidateIdentifier(s string) error {
 	if s == "" {
 		return fmt.Errorf("identifier must not be empty")
 	}
@@ -228,7 +316,7 @@ func validateIdentifier(s string) error {
 }
 
 // quoteIdentifier double-quotes an identifier, doubling any embedded quote.
-// validateIdentifier makes that impossible today; this stays correct anyway so
+// ValidateIdentifier makes that impossible today; this stays correct anyway so
 // the two are not coupled.
 func quoteIdentifier(s string) string {
 	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`

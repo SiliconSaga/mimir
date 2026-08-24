@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -27,6 +28,12 @@ const (
 
 	requeueAfterTransient = 30 * time.Second
 	requeueSteadyState    = 10 * time.Minute
+
+	// forceDeleteAnnotation lets an operator delete a DataService whose
+	// database cannot be dropped — an unreachable cluster, or one already gone.
+	// Deliberately annotation-driven rather than automatic: orphaning tenant
+	// data on a shared cluster should be a decision someone made.
+	forceDeleteAnnotation = "mimir.siliconsaga.org/force-delete"
 )
 
 // SharedCluster describes where an engine's shared server lives and how to
@@ -64,10 +71,18 @@ type DataServiceReconciler struct {
 	SharedClusters map[mimirv1alpha1.Engine]SharedCluster
 }
 
-// +kubebuilder:rbac:groups=mimir.siliconsaga.org,resources=dataservices,verbs=get;list;watch;create;update;patch;delete
+// The controller watches and updates DataService objects but never creates or
+// deletes them — those come from users and from garbage collection — so it
+// does not ask for create or delete.
+//
+// Secrets are get/create/update/patch only. It reads one admin Secret by name
+// and writes one published Secret per tenant, so it never needs to enumerate
+// Secrets — and list/watch cluster-wide would let a compromised operator read
+// every credential in the cluster rather than the ones it manages.
+// +kubebuilder:rbac:groups=mimir.siliconsaga.org,resources=dataservices,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=mimir.siliconsaga.org,resources=dataservices/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=mimir.siliconsaga.org,resources=dataservices/finalizers,verbs=update
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;create;update;patch
 
 func (r *DataServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	l := log.FromContext(ctx)
@@ -137,10 +152,32 @@ func (r *DataServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// Reuse the existing password if a Secret is already present. Generating a
 	// fresh one each reconcile would rotate the credential out from under every
 	// consumer roughly every ten minutes.
-	existing := r.existingPassword(ctx, ds.Namespace, secretName)
-
-	creds, err := prov.Ensure(ctx, target, dbName, existing, engine.Options{Extensions: ds.Spec.Extensions})
+	existing, err := r.existingPassword(ctx, ds.Namespace, secretName)
 	if err != nil {
+		r.setReady(&ds, metav1.ConditionFalse, mimirv1alpha1.ReasonConnectionFailed, err.Error())
+		ds.Status.Phase = "Pending"
+		if statusErr := r.patchStatus(ctx, &ds); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
+		return ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
+	}
+
+	creds, err := prov.Ensure(ctx, target, dbName, existing, engine.Options{
+		Extensions: ds.Spec.Extensions,
+		Owner:      ds.Owner(),
+	})
+	if err != nil {
+		// A conflict is not transient and will not clear by retrying — another
+		// DataService already owns this physical database. Report it as such
+		// and stop hammering the server.
+		var notOwned *engine.ErrNotOwned
+		if errors.As(err, &notOwned) {
+			l.Error(err, "refusing to adopt a database owned by another DataService",
+				"database", dbName)
+			r.setReady(&ds, metav1.ConditionFalse, mimirv1alpha1.ReasonInvalidSpec, err.Error())
+			ds.Status.Phase = "Conflict"
+			return ctrl.Result{}, r.patchStatus(ctx, &ds)
+		}
 		l.Error(err, "provisioning failed", "database", dbName)
 		r.setReady(&ds, metav1.ConditionFalse, mimirv1alpha1.ReasonConnectionFailed, err.Error())
 		ds.Status.Phase = "Failed"
@@ -179,6 +216,13 @@ func (r *DataServiceReconciler) validate(ds *mimirv1alpha1.DataService) error {
 	if len(ds.Spec.Extensions) > 0 && ds.Spec.Engine != mimirv1alpha1.EnginePostgres {
 		return fmt.Errorf("spec.extensions is only valid for engine: postgres")
 	}
+	// Validate the name that will actually be used, not just the field. The
+	// CRD pattern constrains spec.databaseName, but when it is unset the name
+	// is derived — and a derived name that the engine later rejects would
+	// surface as ConnectionFailed, which points at the wrong thing entirely.
+	if err := engine.ValidateIdentifier(ds.ResolvedDatabaseName()); err != nil {
+		return fmt.Errorf("resolved database name %q is not usable: %w", ds.ResolvedDatabaseName(), err)
+	}
 	return nil
 }
 
@@ -191,16 +235,25 @@ func (r *DataServiceReconciler) reconcileDelete(ctx context.Context, ds *mimirv1
 	prov, ok := r.Registry.For(ds.Spec.Engine)
 	shared, hasCluster := r.SharedClusters[ds.Spec.Engine]
 
+	// The escape hatch is explicit and human-set. Releasing automatically on
+	// failure — as an earlier version did — silently orphans a tenant's data on
+	// the shared cluster, where it then blocks the next request for that name
+	// with a conflict nobody can explain.
+	force := ds.Annotations[forceDeleteAnnotation] == "true"
+
 	if ok && hasCluster && ds.ResolvedPlacement() == mimirv1alpha1.PlacementShared {
 		target, err := r.resolveTarget(ctx, shared)
+		if err == nil {
+			err = prov.Drop(ctx, target, ds.ResolvedDatabaseName())
+		}
 		if err != nil {
-			// Do not block deletion forever on an unreachable cluster: that
-			// strands the object with a finalizer nobody can clear by hand.
-			// The database is left behind and logged loudly instead.
-			l.Error(err, "cannot reach cluster to drop database; releasing finalizer anyway",
-				"database", ds.ResolvedDatabaseName())
-		} else if err := prov.Drop(ctx, target, ds.ResolvedDatabaseName()); err != nil {
-			l.Error(err, "dropping database failed; releasing finalizer anyway",
+			if !force {
+				l.Error(err, "cannot drop database; keeping finalizer so the data is not orphaned",
+					"database", ds.ResolvedDatabaseName(),
+					"override", forceDeleteAnnotation+"=true")
+				return ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
+			}
+			l.Error(err, "dropping database failed; releasing finalizer because the override is set",
 				"database", ds.ResolvedDatabaseName())
 		}
 	}
@@ -238,14 +291,27 @@ func (r *DataServiceReconciler) resolveTarget(ctx context.Context, s SharedClust
 	}, nil
 }
 
-// existingPassword returns the password already published, or "" if there is
-// no Secret yet.
-func (r *DataServiceReconciler) existingPassword(ctx context.Context, ns, name string) string {
+// existingPassword returns the password already published.
+//
+// Only a genuine NotFound yields "" — every other read failure is propagated.
+// Treating a transient API error as "no password yet" would make the next
+// Ensure generate a fresh one and rotate the credential out from under a
+// working consumer, turning a momentary blip into a broken service.
+func (r *DataServiceReconciler) existingPassword(ctx context.Context, ns, name string) (string, error) {
 	var secret corev1.Secret
 	if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &secret); err != nil {
-		return ""
+		if apierrors.IsNotFound(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("read published secret %s/%s: %w", ns, name, err)
 	}
-	return string(secret.Data["password"])
+	pw, ok := secret.Data["password"]
+	if !ok {
+		// The Secret exists but is malformed. Generating a replacement would
+		// silently rotate; refusing surfaces it while the database still works.
+		return "", fmt.Errorf("published secret %s/%s has no password key", ns, name)
+	}
+	return string(pw), nil
 }
 
 func (r *DataServiceReconciler) writeSecret(ctx context.Context, ds *mimirv1alpha1.DataService, name string, c engine.Credentials) error {
@@ -303,15 +369,11 @@ func (r *DataServiceReconciler) setReady(ds *mimirv1alpha1.DataService, status m
 
 func (r *DataServiceReconciler) patchStatus(ctx context.Context, ds *mimirv1alpha1.DataService) error {
 	ds.Status.ObservedGeneration = ds.Generation
-	if err := r.Status().Update(ctx, ds); err != nil {
-		if apierrors.IsConflict(err) {
-			// A conflict means someone else wrote first; the next reconcile
-			// recomputes from fresh state rather than clobbering theirs.
-			return nil
-		}
-		return err
-	}
-	return nil
+	// Conflicts are returned, not swallowed. Dropping one loses the status
+	// update with no requeue, so a Ready object can sit reporting a stale
+	// phase until the next steady-state pass ten minutes later.
+	// controller-runtime backs off and retries with fresh state.
+	return r.Status().Update(ctx, ds)
 }
 
 // SetupWithManager wires the controller up.

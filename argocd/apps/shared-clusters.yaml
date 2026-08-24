@@ -16,8 +16,14 @@ kind: Application
 metadata:
   name: mimir-shared-clusters
   namespace: argo
-  finalizers:
-    - resources-finalizer.argocd.argoproj.io
+  # Deliberately NO resources-finalizer.argocd.argoproj.io.
+  #
+  # That finalizer cascades: deleting the Application deletes the resources it
+  # manages, which here means the running database cluster. Setting prune:false
+  # to protect the data and then leaving the cascade in place protects against
+  # a deleted *file* while leaving a deleted *Application* fatal — the smaller
+  # of the two accidents. Without it, removing the Application orphans the
+  # cluster, which is recoverable.
 spec:
   project: default
   source:

@@ -7,6 +7,7 @@ package engine
 
 import (
 	"context"
+	"fmt"
 
 	mimirv1alpha1 "github.com/SiliconSaga/mimir/operator/api/v1alpha1"
 )
@@ -77,6 +78,34 @@ type Provisioner interface {
 type Options struct {
 	// Extensions to enable. PostgreSQL only; ignored elsewhere.
 	Extensions []string
+
+	// Owner identifies the DataService this database belongs to, as
+	// "namespace/name". It is recorded on the database at creation and checked
+	// on every later pass, so a second DataService that resolves to the same
+	// physical name is refused instead of silently adopting the first one's
+	// data and resetting its password.
+	Owner string
+}
+
+// ErrNotOwned is returned when a database exists but belongs to a different
+// DataService — or to something that predates the operator entirely.
+//
+// Never resolve this automatically. Adopting the database would hand one
+// tenant another's data, and dropping it would destroy data the operator did
+// not create. It needs a human.
+type ErrNotOwned struct {
+	Database string
+	Want     string
+	Got      string
+}
+
+func (e *ErrNotOwned) Error() string {
+	got := e.Got
+	if got == "" {
+		got = "no owner marker (created outside the operator)"
+	}
+	return fmt.Sprintf("database %q belongs to %s, not %s — refusing to touch it",
+		e.Database, got, e.Want)
 }
 
 // Registry maps engines to their provisioners.

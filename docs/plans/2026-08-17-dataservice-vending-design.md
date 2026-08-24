@@ -51,12 +51,12 @@ metadata:
 spec:
   engine: postgres              # postgres | mysql | mongodb
   placement: shared             # shared | dedicated
-  databaseName: forgejo         # optional; defaults to metadata.name
+  databaseName: forgejo         # optional; otherwise derived from namespace + name
   # version is only legal when placement: dedicated — see below
   extensions: [pgcrypto]        # postgres only
 status:
   phase: Ready
-  secret: forgejo-dataservice   # the Strimzi contract
+  secretName: forgejo-dataservice   # the Strimzi contract
   host: mimir-postgres-pgbouncer.mimir.svc
   port: 5432
 ```
@@ -69,7 +69,7 @@ This also resolves a tension worth naming: a since-deleted `percona/docs/archite
 
 That also gives the version-skew story a clean shape: an app that truly needs a different major version is telling you it needs `dedicated`, and the API says so.
 
-**The Secret** carries `host`, `port`, `database`, `username`, `password`, and a ready-assembled connection URI. Its name is reported in `status.secret` so consumers never guess.
+**The Secret** carries `host`, `port`, `database`, `username`, `password`, and a ready-assembled connection URI. Its name is reported in `status.secretName` so consumers never guess.
 
 **Optional namespace-local handle:** an `ExternalName` Service in the app's namespace pointing at the shared cluster's Service, so app config can reference a local name regardless of placement. Cheap, and it makes `shared` → `dedicated` a genuinely transparent switch.
 

@@ -1,6 +1,10 @@
 package v1alpha1
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"strings"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -158,13 +162,83 @@ func init() {
 	SchemeBuilder.Register(&DataService{}, &DataServiceList{})
 }
 
-// ResolvedDatabaseName returns the database name to use, defaulting to the
-// object's own name when the field is unset.
+// maxIdentifier is PostgreSQL's NAMEDATALEN-1. MySQL allows 64, so the lower
+// of the two is used everywhere rather than per-engine.
+const maxIdentifier = 63
+
+// ResolvedDatabaseName returns the physical database name on the server.
+//
+// When spec.databaseName is unset this derives a name from namespace AND
+// object name, not from the object name alone. On a per-app cluster the
+// object's name was unique enough because the cluster was too — on a SHARED
+// cluster nothing else disambiguates, so two DataServices called "app" in
+// different namespaces would otherwise resolve to the same physical database
+// and the second to reconcile would adopt the first tenant's data.
+//
+// An explicit spec.databaseName is still honoured, because an app may need a
+// particular name and the value is already constrained by the CRD pattern.
+// That path is protected at provisioning time instead: the engine records an
+// ownership marker on the database and refuses to touch one it does not own.
 func (d *DataService) ResolvedDatabaseName() string {
 	if d.Spec.DatabaseName != "" {
 		return d.Spec.DatabaseName
 	}
-	return d.Name
+	return DerivePhysicalName(d.Namespace, d.Name)
+}
+
+// Owner is the identity recorded on the provisioned database so a later
+// reconcile — of this object or any other — can tell whose it is.
+func (d *DataService) Owner() string {
+	return d.Namespace + "/" + d.Name
+}
+
+// DerivePhysicalName builds a valid, collision-free SQL identifier from a
+// namespace and name.
+//
+// Kubernetes names are DNS labels: lower-case, hyphen-separated, possibly
+// starting with a digit. SQL identifiers allow none of that unquoted, so
+// hyphens and dots become underscores and a leading digit gets a prefix.
+//
+// Truncation keeps a hash of the FULL input, so two long namespaces sharing a
+// prefix stay distinct — plain truncation would reintroduce exactly the
+// collision this function exists to prevent.
+func DerivePhysicalName(namespace, name string) string {
+	full := namespace + "_" + name
+	sanitized := sanitizeIdentifier(full)
+
+	if len(sanitized) > maxIdentifier {
+		sum := sha256.Sum256([]byte(full))
+		suffix := "_" + hex.EncodeToString(sum[:])[:8]
+		sanitized = sanitized[:maxIdentifier-len(suffix)] + suffix
+	}
+	return sanitized
+}
+
+func sanitizeIdentifier(s string) string {
+	s = strings.ToLower(s)
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '_':
+			b.WriteRune(r)
+		default:
+			// '-' and '.' are the realistic cases; anything else a Kubernetes
+			// name could carry collapses the same way.
+			b.WriteRune('_')
+		}
+	}
+	out := b.String()
+	if out == "" {
+		return "db"
+	}
+	// An identifier may not begin with a digit unquoted.
+	if out[0] >= '0' && out[0] <= '9' {
+		out = "d_" + out
+		if len(out) > maxIdentifier {
+			out = out[:maxIdentifier]
+		}
+	}
+	return out
 }
 
 // ResolvedPlacement defaults to shared when unset, matching the CRD default.

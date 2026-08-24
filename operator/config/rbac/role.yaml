@@ -11,17 +11,13 @@ rules:
   verbs:
   - create
   - get
-  - list
   - patch
   - update
-  - watch
 - apiGroups:
   - mimir.siliconsaga.org
   resources:
   - dataservices
   verbs:
-  - create
-  - delete
   - get
   - list
   - patch

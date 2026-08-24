@@ -30,7 +30,7 @@ func TestValidateIdentifier(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validateIdentifier(tc.in)
+			err := ValidateIdentifier(tc.in)
 			if tc.valid && err != nil {
 				t.Fatalf("expected %q to be valid, got %v", tc.in, err)
 			}
@@ -46,12 +46,12 @@ func TestValidateIdentifierLength(t *testing.T) {
 	for i := range long {
 		long[i] = 'a'
 	}
-	if err := validateIdentifier(string(long)); err == nil {
+	if err := ValidateIdentifier(string(long)); err == nil {
 		t.Fatal("expected a 64-character identifier to be rejected")
 	}
 
 	ok := long[:63]
-	if err := validateIdentifier(string(ok)); err != nil {
+	if err := ValidateIdentifier(string(ok)); err != nil {
 		t.Fatalf("expected a 63-character identifier to be accepted, got %v", err)
 	}
 }
