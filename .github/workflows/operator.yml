@@ -100,9 +100,14 @@ jobs:
     # Pull requests build but do not publish, so a broken Dockerfile fails in
     # review rather than on merge, without putting an unreviewed image behind
     # a tag the cluster might pull.
+    #
+    # `permissions` takes no expressions — a context here fails workflow
+    # validation outright, with no jobs and no useful error. The grant is
+    # therefore static and the *use* is conditional: on a pull request this job
+    # never logs in and never pushes, so the token is simply unused.
     permissions:
       contents: read
-      packages: ${{ github.event_name == 'pull_request' && 'read' || 'write' }}
+      packages: write
     steps:
       - uses: actions/checkout@v4
         with:
