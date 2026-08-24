@@ -16,9 +16,11 @@ on:
       - '.github/workflows/operator.yml'
   workflow_dispatch:
 
+# Read-only by default. `packages: write` is granted only to the job that
+# publishes, so the job that runs repository code in go vet/test/run never
+# holds a token that could push an image.
 permissions:
   contents: read
-  packages: write
 
 defaults:
   run:
@@ -44,6 +46,10 @@ jobs:
           --health-retries 5
     steps:
       - uses: actions/checkout@v4
+        with:
+          # No Git operation here needs the token, and leaving it in the
+          # runner's git config exposes it to everything the tests execute.
+          persist-credentials: false
       - uses: actions/setup-go@v5
         with:
           go-version-file: operator/go.mod
@@ -90,12 +96,17 @@ jobs:
 
   build:
     needs: test
-    # Only publish from main. A PR build proves the Dockerfile works without
-    # putting an unreviewed image behind a tag the cluster might pull.
-    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    # Pull requests build but do not publish, so a broken Dockerfile fails in
+    # review rather than on merge, without putting an unreviewed image behind
+    # a tag the cluster might pull.
+    permissions:
+      contents: read
+      packages: ${{ github.event_name == 'pull_request' && 'read' || 'write' }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: read version
         id: version
@@ -104,7 +115,10 @@ jobs:
       # buildx with the docker-container driver is required for cache-to
       # type=gha; the default docker driver has no cache exporter.
       - uses: docker/setup-buildx-action@v3
+
+      # Registry credentials only where something is actually pushed.
       - uses: docker/login-action@v3
+        if: github.event_name != 'pull_request'
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -125,7 +139,7 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: operator
-          push: true
+          push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha

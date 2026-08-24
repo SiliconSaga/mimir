@@ -20,8 +20,11 @@ package engine
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -31,19 +34,37 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// testDB returns a database name unique to this run.
+//
+// Fixed names would collide between two concurrent runs against the same
+// server — a stray leftover from a killed run then fails the next one for a
+// reason that has nothing to do with the code under test.
+func testDB(t *testing.T, stem string) string {
+	t.Helper()
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		t.Fatalf("random suffix: %v", err)
+	}
+	return stem + "_" + hex.EncodeToString(b[:])
+}
+
 func testTarget(t *testing.T) Target {
 	t.Helper()
 	addr := os.Getenv("MIMIR_TEST_PG")
 	if addr == "" {
 		t.Skip("MIMIR_TEST_PG not set")
 	}
-	host, portStr, ok := strings.Cut(addr, ":")
-	if !ok {
-		t.Fatalf("MIMIR_TEST_PG must be host:port, got %q", addr)
+	// SplitHostPort rather than Cut, so a bracketed IPv6 literal parses.
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("MIMIR_TEST_PG must be host:port, got %q: %v", addr, err)
 	}
 	port, err := strconv.Atoi(portStr)
 	if err != nil {
 		t.Fatalf("bad port in MIMIR_TEST_PG: %v", err)
+	}
+	if port < 1 || port > 65535 {
+		t.Fatalf("port %d in MIMIR_TEST_PG out of range", port)
 	}
 	return Target{
 		Host: host, Port: int32(port),
@@ -83,24 +104,26 @@ func TestTenantIsolation(t *testing.T) {
 	defer cancel()
 
 	p := Postgres{}
+	alphaDB := testDB(t, "tenant_alpha")
+	betaDB := testDB(t, "tenant_beta")
 
-	alpha, err := p.Ensure(ctx, tgt, "tenant_alpha", "", Options{})
+	alpha, err := p.Ensure(ctx, tgt, alphaDB, "", Options{})
 	if err != nil {
 		t.Fatalf("provisioning tenant_alpha: %v", err)
 	}
-	t.Cleanup(func() { _ = p.Drop(context.Background(), tgt, "tenant_alpha") })
+	t.Cleanup(func() { _ = p.Drop(context.Background(), tgt, alphaDB) })
 
-	beta, err := p.Ensure(ctx, tgt, "tenant_beta", "", Options{})
+	beta, err := p.Ensure(ctx, tgt, betaDB, "", Options{})
 	if err != nil {
 		t.Fatalf("provisioning tenant_beta: %v", err)
 	}
-	t.Cleanup(func() { _ = p.Drop(context.Background(), tgt, "tenant_beta") })
+	t.Cleanup(func() { _ = p.Drop(context.Background(), tgt, betaDB) })
 
 	// Each tenant reaches its own database.
-	if err := connectAs(ctx, tgt, alpha.Username, alpha.Password, "tenant_alpha"); err != nil {
+	if err := connectAs(ctx, tgt, alpha.Username, alpha.Password, alphaDB); err != nil {
 		t.Fatalf("alpha cannot reach its own database: %v", err)
 	}
-	if err := connectAs(ctx, tgt, beta.Username, beta.Password, "tenant_beta"); err != nil {
+	if err := connectAs(ctx, tgt, beta.Username, beta.Password, betaDB); err != nil {
 		t.Fatalf("beta cannot reach its own database: %v", err)
 	}
 
@@ -108,8 +131,8 @@ func TestTenantIsolation(t *testing.T) {
 	for _, tc := range []struct {
 		name, user, password, database string
 	}{
-		{"alpha into beta", alpha.Username, alpha.Password, "tenant_beta"},
-		{"beta into alpha", beta.Username, beta.Password, "tenant_alpha"},
+		{"alpha into beta", alpha.Username, alpha.Password, betaDB},
+		{"beta into alpha", beta.Username, beta.Password, alphaDB},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := connectAs(ctx, tgt, tc.user, tc.password, tc.database)
@@ -137,7 +160,7 @@ func TestRefusesToAdoptAnotherOwnersDatabase(t *testing.T) {
 	defer cancel()
 
 	p := Postgres{}
-	const db = "tenant_contested"
+	db := testDB(t, "tenant_contested")
 
 	first, err := p.Ensure(ctx, tgt, db, "", Options{Owner: "team-a/app"})
 	if err != nil {
@@ -168,6 +191,8 @@ func TestRefusesUnmarkedPreExistingDatabase(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
+	preDB := testDB(t, "tenant_preexisting")
+
 	admin := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
 		tgt.AdminUser, tgt.AdminPassword, tgt.AdminHost, tgt.AdminPort, tgt.AdminDatabase)
 	conn, err := pgx.Connect(ctx, admin)
@@ -176,7 +201,7 @@ func TestRefusesUnmarkedPreExistingDatabase(t *testing.T) {
 	}
 	defer conn.Close(ctx)
 
-	if _, err := conn.Exec(ctx, "CREATE DATABASE tenant_preexisting"); err != nil {
+	if _, err := conn.Exec(ctx, "CREATE DATABASE "+quoteIdentifier(preDB)); err != nil {
 		t.Fatalf("seeding a hand-made database: %v", err)
 	}
 	t.Cleanup(func() {
@@ -185,10 +210,10 @@ func TestRefusesUnmarkedPreExistingDatabase(t *testing.T) {
 			return
 		}
 		defer c.Close(context.Background())
-		_, _ = c.Exec(context.Background(), "DROP DATABASE IF EXISTS tenant_preexisting")
+		_, _ = c.Exec(context.Background(), "DROP DATABASE IF EXISTS "+quoteIdentifier(preDB))
 	})
 
-	_, err = Postgres{}.Ensure(ctx, tgt, "tenant_preexisting", "", Options{Owner: "team-a/app"})
+	_, err = Postgres{}.Ensure(ctx, tgt, preDB, "", Options{Owner: "team-a/app"})
 	var notOwned *ErrNotOwned
 	if !errors.As(err, &notOwned) {
 		t.Fatalf("expected an ownership conflict for an unmarked database, got %v", err)
@@ -207,14 +232,15 @@ func TestEnsureIsIdempotent(t *testing.T) {
 	defer cancel()
 
 	p := Postgres{}
+	idemDB := testDB(t, "tenant_idem")
 
-	first, err := p.Ensure(ctx, tgt, "tenant_idem", "", Options{})
+	first, err := p.Ensure(ctx, tgt, idemDB, "", Options{})
 	if err != nil {
 		t.Fatalf("first Ensure: %v", err)
 	}
-	t.Cleanup(func() { _ = p.Drop(context.Background(), tgt, "tenant_idem") })
+	t.Cleanup(func() { _ = p.Drop(context.Background(), tgt, idemDB) })
 
-	second, err := p.Ensure(ctx, tgt, "tenant_idem", first.Password, Options{})
+	second, err := p.Ensure(ctx, tgt, idemDB, first.Password, Options{})
 	if err != nil {
 		t.Fatalf("second Ensure: %v", err)
 	}
@@ -227,7 +253,7 @@ func TestEnsureIsIdempotent(t *testing.T) {
 
 	// The credential still works after the second pass, which is what proves
 	// the re-applied ALTER ROLE agrees with the Secret rather than drifting.
-	if err := connectAs(ctx, tgt, second.Username, second.Password, "tenant_idem"); err != nil {
+	if err := connectAs(ctx, tgt, second.Username, second.Password, idemDB); err != nil {
 		t.Fatalf("credential broken after reconcile: %v", err)
 	}
 }
@@ -241,12 +267,13 @@ func TestDropRemovesEverything(t *testing.T) {
 	defer cancel()
 
 	p := Postgres{}
+	dropDB := testDB(t, "tenant_drop")
 
-	creds, err := p.Ensure(ctx, tgt, "tenant_drop", "", Options{})
+	creds, err := p.Ensure(ctx, tgt, dropDB, "", Options{})
 	if err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
-	if err := p.Drop(ctx, tgt, "tenant_drop"); err != nil {
+	if err := p.Drop(ctx, tgt, dropDB); err != nil {
 		t.Fatalf("Drop: %v", err)
 	}
 
@@ -260,7 +287,7 @@ func TestDropRemovesEverything(t *testing.T) {
 
 	var n int
 	if err := conn.QueryRow(ctx,
-		"SELECT count(*) FROM pg_database WHERE datname = $1", "tenant_drop").Scan(&n); err != nil {
+		"SELECT count(*) FROM pg_database WHERE datname = $1", dropDB).Scan(&n); err != nil {
 		t.Fatalf("querying pg_database: %v", err)
 	}
 	if n != 0 {
@@ -277,8 +304,8 @@ func TestDropRemovesEverything(t *testing.T) {
 
 	// Re-provisioning the same name must work, which is the practical
 	// consequence of the two checks above.
-	if _, err := p.Ensure(ctx, tgt, "tenant_drop", "", Options{}); err != nil {
+	if _, err := p.Ensure(ctx, tgt, dropDB, "", Options{}); err != nil {
 		t.Fatalf("re-provisioning after Drop: %v", err)
 	}
-	t.Cleanup(func() { _ = p.Drop(context.Background(), tgt, "tenant_drop") })
+	t.Cleanup(func() { _ = p.Drop(context.Background(), tgt, dropDB) })
 }
