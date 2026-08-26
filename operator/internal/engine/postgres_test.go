@@ -58,9 +58,9 @@ func TestValidateIdentifierLength(t *testing.T) {
 
 func TestQuoteIdentifier(t *testing.T) {
 	cases := map[string]string{
-		"forgejo":  `"forgejo"`,
-		`ev"il`:    `"ev""il"`,
-		`a""b`:     `"a""""b"`,
+		"forgejo": `"forgejo"`,
+		`ev"il`:   `"ev""il"`,
+		`a""b`:    `"a""""b"`,
 	}
 	for in, want := range cases {
 		if got := quoteIdentifier(in); got != want {
@@ -71,9 +71,9 @@ func TestQuoteIdentifier(t *testing.T) {
 
 func TestQuoteLiteral(t *testing.T) {
 	cases := map[string]string{
-		"hunter2":     `'hunter2'`,
-		"it's":        `'it''s'`,
-		"'; DROP --":  `'''; DROP --'`,
+		"hunter2":    `'hunter2'`,
+		"it's":       `'it''s'`,
+		"'; DROP --": `'''; DROP --'`,
 	}
 	for in, want := range cases {
 		if got := quoteLiteral(in); got != want {

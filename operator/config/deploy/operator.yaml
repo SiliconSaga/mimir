@@ -115,6 +115,15 @@ spec:
             # outright rather than downgraded.
             - name: MIMIR_POSTGRES_TLS
               value: "true"
+            # pgBouncer does not verify passwords itself — it connects as this
+            # role into the database the client asked for and runs an
+            # auth_query there. Vended databases revoke CONNECT from PUBLIC,
+            # which catches this role too, so each one has to admit it
+            # explicitly or NOTHING can connect through MIMIR_POSTGRES_HOST.
+            # Stated here rather than left to the built-in default because the
+            # value is Percona-specific and worth being able to see.
+            - name: MIMIR_POSTGRES_POOLER_AUTH_ROLE
+              value: _crunchypgbouncer
           # Requests present from the start. An operator with a health probe
           # and no request is the restart loop this platform keeps rediscovering.
           resources:

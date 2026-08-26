@@ -109,6 +109,13 @@ Shared clusters are supplied by environment rather than discovered, so the opera
 | `MIMIR_POSTGRES_ADMIN_PASSWORD_KEY` | `password` | |
 | `MIMIR_POSTGRES_ADMIN_DATABASE` | `postgres` | |
 | `MIMIR_POSTGRES_TLS` | `true` | Percona serves `hostssl` only |
+| `MIMIR_POSTGRES_POOLER_AUTH_ROLE` | `_crunchypgbouncer` | role the pooler authenticates as; `""` disables the bootstrap |
+
+**Vended databases must admit the pooler's own role, or the published URI cannot connect.** pgBouncer does not verify passwords itself: it connects as `POOLER_AUTH_ROLE` into the database the client named and runs an `auth_query` there. A database this operator creates revokes `CONNECT` from `PUBLIC` — that revoke is what makes the shared cluster multi-tenant — and the revoke catches the pooler's role too. So each database is granted `CONNECT` for that role plus a `pgbouncer.get_auth()` lookup function, scoped to it alone.
+
+Two things make that safe to default on. The bootstrap first checks whether the role exists and does nothing when it does not, so pointing this operator at a server with no such pooler is a no-op. And the function is `SECURITY DEFINER` living in a database the *tenant* owns, so it is created with `SET search_path = pg_catalog` and fully qualified references — without that, a tenant could shadow `pg_catalog` and have it run with admin rights.
+
+The failure mode this fixes was silent: pgBouncer reports the failed lookup to the client as `permission denied for database "x"`, which is exactly what a correctly refused cross-tenant attempt looks like.
 
 **Admin and consumer endpoints must differ when a pooler is in front.** `CREATE DATABASE` cannot run inside a transaction block, and a pooler in transaction mode wraps every statement in one — so admin traffic goes to the primary while consumers get the pooler. Pointing both at the pooler produces a confusing failure deep inside a reconcile.
 

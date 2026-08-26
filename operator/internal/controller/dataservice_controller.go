@@ -57,6 +57,10 @@ type SharedCluster struct {
 	AdminDatabase string
 	// TLS is whether the server requires an encrypted connection.
 	TLS bool
+	// PoolerAuthRole is the role the pooler authenticates as when it looks a
+	// client's password up. Vended databases have to admit it explicitly or the
+	// published URI cannot connect at all.
+	PoolerAuthRole string
 }
 
 // DataServiceReconciler reconciles a DataService object.
@@ -339,14 +343,15 @@ func (r *DataServiceReconciler) resolveTarget(ctx context.Context, s SharedClust
 	}
 
 	return engine.Target{
-		Host:          s.Host,
-		Port:          s.Port,
-		AdminHost:     s.AdminHost,
-		AdminPort:     s.AdminPort,
-		AdminUser:     string(user),
-		AdminPassword: string(pass),
-		AdminDatabase: s.AdminDatabase,
-		TLS:           s.TLS,
+		Host:           s.Host,
+		Port:           s.Port,
+		AdminHost:      s.AdminHost,
+		AdminPort:      s.AdminPort,
+		AdminUser:      string(user),
+		AdminPassword:  string(pass),
+		AdminDatabase:  s.AdminDatabase,
+		TLS:            s.TLS,
+		PoolerAuthRole: s.PoolerAuthRole,
 	}, nil
 }
 

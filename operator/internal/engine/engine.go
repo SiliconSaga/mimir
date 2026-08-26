@@ -40,6 +40,18 @@ type Target struct {
 	// Crunchy clusters serve hostssl only, and connecting with sslmode=disable
 	// is rejected outright rather than downgraded.
 	TLS bool
+
+	// PoolerAuthRole is the role the pooler in front of Host authenticates AS
+	// when it looks a client's password up. Empty means "no bootstrap needed".
+	//
+	// This exists because a pooler does not verify passwords itself. Percona's
+	// (and Crunchy's) pgBouncer runs an auth_query — by default
+	// `SELECT username, password FROM pgbouncer.get_auth($1)` — by connecting
+	// as this role INTO THE DATABASE THE CLIENT ASKED FOR. A database this
+	// operator vends has neither the CONNECT grant (revoked from PUBLIC on
+	// purpose) nor that function, so the lookup fails and every client is
+	// refused. See Postgres.ensurePoolerAuth for what is installed and why.
+	PoolerAuthRole string
 }
 
 // Credentials are what gets written into the consuming namespace's Secret.
