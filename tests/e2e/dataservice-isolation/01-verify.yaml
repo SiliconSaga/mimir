@@ -36,12 +36,17 @@ commands:
       PORT=$(kubectl get secret tenant-a-dataservice -n "$NS" -o jsonpath='{.data.port}' | base64 -d)
       B_DB=$(kubectl get secret tenant-b-dataservice -n "$NS" -o jsonpath='{.data.database}' | base64 -d)
 
-      CROSS="postgres://${A_USER}:${A_PASS}@${HOST}:${PORT}/${B_DB}?sslmode=require"
-
+      # Credentials as libpq parameters and PGPASSWORD, not a URI. A password
+      # inside the connection string lands in the pod's argv, which `kubectl
+      # describe pod` prints back and the API server records in its audit log.
       set +e
       OUT=$(kubectl run isolation-cross --rm -i --restart=Never -n "$NS" \
-        --image=postgres:15 --command -- \
-        psql "$CROSS" -tAc "SELECT 1" 2>&1)
+        --image=postgres:15 \
+        --env="PGPASSWORD=${A_PASS}" \
+        --env="PGSSLMODE=require" \
+        --command -- \
+        psql --host="$HOST" --port="$PORT" --username="$A_USER" \
+             --dbname="$B_DB" -tAc "SELECT 1" 2>&1)
       RC=$?
       set -e
 
@@ -51,10 +56,15 @@ commands:
         exit 1
       fi
 
-      # Insist on the RIGHT failure. A typo in the host would also exit
-      # non-zero and would otherwise look like a pass.
-      if ! echo "$OUT" | grep -Eqi 'permission denied|not permitted|no pg_hba|authentication failed'; then
-        echo "connection failed, but not for the expected reason:" >&2
+      # Insist on the RIGHT failure, and specifically on an AUTHORIZATION one.
+      #
+      # The earlier pattern also accepted "authentication failed" and "no
+      # pg_hba", which is too generous: a wrong password or a pg_hba
+      # misconfiguration produces those and would have passed the test while
+      # proving nothing about REVOKE CONNECT. A typo in the host exits
+      # non-zero too. Only a database-level permission refusal counts.
+      if ! echo "$OUT" | grep -Eqi 'permission denied for database|does not have CONNECT privilege'; then
+        echo "connection failed, but not by the grant model:" >&2
         echo "$OUT" >&2
         exit 1
       fi
