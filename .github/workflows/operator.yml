@@ -122,7 +122,14 @@ jobs:
 
   publish:
     needs: test
-    if: github.event_name != 'pull_request'
+    # Default branch AND not a pull request. The branch check is not redundant:
+    # workflow_dispatch can target any branch, and `!= pull_request` alone would
+    # let a dispatch from a feature branch republish the VERSION tag that the
+    # operator Deployment pins — silently replacing what the cluster pulls with
+    # unreviewed code.
+    if: >-
+      github.event_name != 'pull_request' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
     permissions:
       contents: read
