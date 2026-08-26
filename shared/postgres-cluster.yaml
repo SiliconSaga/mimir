@@ -40,7 +40,12 @@ spec:
           - ReadWriteOnce
         resources:
           requests:
-            storage: 20Gi
+            # 10Gi, and this number is load-bearing: it is the input to the
+            # backup repository sizing below, so the two cannot be changed
+            # independently. Twenty times current usage — Ting and Keycloak are
+            # both under 500Mi — and standard-rwo supports volume expansion, so
+            # growing later is a one-line change rather than a migration.
+            storage: 10Gi
       initContainer:
         image: percona/percona-postgresql-operator:2.7.0
         containerSecurityContext:
@@ -61,14 +66,16 @@ spec:
           limits:
             cpu: 250m
             memory: 256Mi
-      # Retention, sized against the repository below rather than picked as a
+      # Retention, derived from the repository size rather than picked as a
       # round number. Without any retention pgBackRest keeps every full backup
       # until the volume fills, at which point backups start failing — the
       # failure mode that stays invisible until a restore is attempted.
       #
-      # 4 weekly fulls, so roughly a month of history.
+      # 2 weekly fulls, so a fortnight of history. Fewer than the 4 first
+      # written here, because 4 was aspirational rather than affordable: see
+      # the arithmetic on repo1 below.
       global:
-        repo1-retention-full: "4"
+        repo1-retention-full: "2"
         repo1-retention-full-type: count
       repos:
         - name: repo1
@@ -85,19 +92,25 @@ spec:
                 - ReadWriteOnce
               resources:
                 requests:
-                  # Matched to the data volume above, not chosen independently.
-                  # The repo has to hold 4 retained fulls plus the week's
-                  # differentials plus WAL, so a repo smaller than the data
-                  # volume is only viable because compression is roughly 3x and
-                  # real tenant datasets are far below the 20Gi ceiling — Ting
-                  # and Keycloak are both under 500Mi today.
+                  # Derived, not guessed. The repo must hold the retained fulls
+                  # plus the week's differentials plus WAL:
                   #
-                  # That assumption is the fragile part, so it is watched rather
-                  # than trusted: Heimdall's HeimdallVolumeFillingUp covers every
-                  # volume including this one, and a failing backup Job raises
-                  # HeimdallDatabaseBackupFailed. Raise both numbers together if
-                  # a tenant ever approaches the data ceiling.
-                  storage: 20Gi
+                  #   2 fulls x 10Gi data = 20Gi   worst case, zero compression
+                  #   + differentials and WAL      ~10Gi headroom
+                  #   ------------------------------------------------
+                  #                                 30Gi
+                  #
+                  # Deliberately sized for INCOMPRESSIBLE data. pgBackRest
+                  # compresses, and real Postgres content compresses well, but a
+                  # retention promise that only holds for compressible tenants
+                  # is one that fails on the tenant who stores encrypted blobs —
+                  # and it fails by silently dropping backups, which is the
+                  # least visible failure this platform can have.
+                  #
+                  # An earlier revision paired 4 fulls with a 20Gi repo against a
+                  # 20Gi data volume, which could not hold even one worst-case
+                  # full. Change data size, retention and this number together.
+                  storage: 30Gi
       # NOTE: repo1 is a LOCAL PVC. There is no offsite copy, so this survives
       # a pod restart but not the loss of the cluster. Deliberate for now and
       # recorded rather than implied — see the design's "Deferred, with the
