@@ -97,13 +97,36 @@ func cleanupMySQL(t *testing.T, tgt Target, database string) {
 
 // openMySQL connects with an arbitrary credential, which is how a tenant's own
 // connection is simulated.
+//
+// Uses the CONSUMER endpoint (Host/Port), not the admin one, because that is
+// what a tenant is actually handed in its Secret. They are the same address in
+// this harness, so nothing changes today — but pointing at AdminHost would mean
+// a deployment that genuinely splits the two could break every consumer while
+// these tests stayed green.
 func openMySQL(tgt Target, user, password, database string) (*sql.DB, error) {
 	cfg := mysql.NewConfig()
 	cfg.User = user
 	cfg.Passwd = password
 	cfg.Net = "tcp"
-	cfg.Addr = net.JoinHostPort(tgt.AdminHost, strconv.Itoa(int(tgt.AdminPort)))
+	cfg.Addr = net.JoinHostPort(tgt.Host, strconv.Itoa(int(tgt.Port)))
 	cfg.DBName = database
+	if tgt.TLS {
+		cfg.TLSConfig = "skip-verify"
+	}
+	return sql.Open("mysql", cfg.FormatDSN())
+}
+
+// openMySQLAdmin connects to the ADMIN endpoint, for the direct catalog and
+// GRANT manipulation a test does on its own behalf. Kept separate from
+// openMySQL so the consumer/admin split stays visible in the tests rather than
+// resting on the two happening to be the same address here.
+func openMySQLAdmin(tgt Target) (*sql.DB, error) {
+	cfg := mysql.NewConfig()
+	cfg.User = tgt.AdminUser
+	cfg.Passwd = tgt.AdminPassword
+	cfg.Net = "tcp"
+	cfg.Addr = net.JoinHostPort(tgt.AdminHost, strconv.Itoa(int(tgt.AdminPort)))
+	cfg.DBName = tgt.AdminDatabase
 	if tgt.TLS {
 		cfg.TLSConfig = "skip-verify"
 	}
@@ -215,7 +238,7 @@ func TestMySQLGrantWildcardDoesNotLeak(t *testing.T) {
 	}
 	cleanupMySQL(t, tgt, tenantDB)
 
-	admin, err := openMySQL(tgt, tgt.AdminUser, tgt.AdminPassword, tgt.AdminDatabase)
+	admin, err := openMySQLAdmin(tgt)
 	if err != nil {
 		t.Fatalf("admin connection: %v", err)
 	}
@@ -232,7 +255,7 @@ func TestMySQLGrantWildcardDoesNotLeak(t *testing.T) {
 		// "sql: database is closed" and left the decoy database behind.
 		c, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		conn, err := openMySQL(tgt, tgt.AdminUser, tgt.AdminPassword, tgt.AdminDatabase)
+		conn, err := openMySQLAdmin(tgt)
 		if err != nil {
 			t.Errorf("cleanup: reconnecting to drop decoy %q: %v", decoyDB, err)
 			return
@@ -329,6 +352,66 @@ func TestMySQLOwnershipRefusesForeignDatabase(t *testing.T) {
 	var notOwned *ErrNotOwned
 	if !errors.As(err, &notOwned) {
 		t.Fatalf("second owner: got %v, want ErrNotOwned", err)
+	}
+	// The conflict must be reported against the DATABASE the caller asked for.
+	// This message goes verbatim into status.conditions, and for a long name
+	// the MySQL account is a truncated hash the user has never seen — naming it
+	// as the thing that conflicts sends them looking for a string that appears
+	// nowhere in their manifest.
+	if notOwned.Database != dbName {
+		t.Errorf("conflict reported against %q, want the requested database %q",
+			notOwned.Database, dbName)
+	}
+}
+
+// TestMySQLOwnershipConflictOnUserNamesTheDatabase covers the same requirement
+// on the OTHER path into ErrNotOwned: an account that is not ours while the
+// database itself is absent, which is what a partially-cleaned-up tenant leaves
+// behind.
+func TestMySQLOwnershipConflictOnUserNamesTheDatabase(t *testing.T) {
+	tgt := testMySQLTarget(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	m := MySQL{}
+	dbName := testMySQLDB(t, "useronly")
+
+	if _, err := m.Ensure(ctx, tgt, dbName, "", Options{Owner: "ns/first/uid-1"}); err != nil {
+		t.Fatalf("first Ensure: %v", err)
+	}
+	t.Cleanup(func() {
+		c, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := m.Drop(c, tgt, dbName, ""); err != nil {
+			t.Errorf("cleanup: %v", err)
+		}
+	})
+
+	// Drop the database but leave the account, so the next Ensure reaches the
+	// user-ownership branch rather than the database one.
+	admin, err := openMySQLAdmin(tgt)
+	if err != nil {
+		t.Fatalf("admin connection: %v", err)
+	}
+	defer func() { _ = admin.Close() }()
+	if _, err := admin.ExecContext(ctx,
+		fmt.Sprintf("DROP DATABASE IF EXISTS %s", quoteMySQLIdentifier(dbName))); err != nil {
+		t.Fatalf("dropping database while keeping the account: %v", err)
+	}
+
+	_, err = m.Ensure(ctx, tgt, dbName, "", Options{Owner: "ns/second/uid-2"})
+	var notOwned *ErrNotOwned
+	if !errors.As(err, &notOwned) {
+		t.Fatalf("second owner: got %v, want ErrNotOwned", err)
+	}
+	if notOwned.Database != dbName {
+		t.Errorf("conflict reported against %q, want the requested database %q",
+			notOwned.Database, dbName)
+	}
+	// The account should still be named somewhere, since that is the actual
+	// obstruction — just not in the "database X belongs to" slot.
+	if !strings.Contains(err.Error(), mysqlUserName(dbName)) {
+		t.Errorf("error %q should name the conflicting account %q", err, mysqlUserName(dbName))
 	}
 }
 

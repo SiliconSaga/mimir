@@ -130,7 +130,17 @@ func (m MySQL) Ensure(ctx context.Context, t Target, database, current string, o
 			return creds, err
 		}
 		if marker != opts.Owner {
-			return creds, &ErrNotOwned{Database: user, Want: opts.Owner, Got: marker}
+			// Reported against the DATABASE, with the account named separately.
+			// ErrNotOwned's message reads "database %q belongs to …", and it
+			// lands verbatim in status.conditions — so naming the account there
+			// would tell the user their database conflict is about a string
+			// they never wrote. Postgres can get away with passing the role,
+			// because there role and database are always the same name; here a
+			// long database yields a truncated-and-hashed account nobody has
+			// seen. Wrapped rather than replaced so errors.As still classifies
+			// it as a Conflict.
+			return creds, fmt.Errorf("its MySQL account %q is not ours: %w",
+				user, &ErrNotOwned{Database: database, Want: opts.Owner, Got: marker})
 		}
 	}
 

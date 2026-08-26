@@ -109,6 +109,7 @@ Shared clusters are supplied by environment rather than discovered, so the opera
 | `MIMIR_POSTGRES_ADMIN_HOST` | `=HOST` | where **DDL** runs — the primary |
 | `MIMIR_POSTGRES_ADMIN_PORT` | `=PORT` | |
 | `MIMIR_POSTGRES_ADMIN_SECRET` | required | `namespace/name` |
+| `MIMIR_POSTGRES_ADMIN_USER` | — | literal name; wins over `ADMIN_USER_KEY` when set |
 | `MIMIR_POSTGRES_ADMIN_USER_KEY` | `user` | |
 | `MIMIR_POSTGRES_ADMIN_PASSWORD_KEY` | `password` | |
 | `MIMIR_POSTGRES_ADMIN_DATABASE` | `postgres` | |
@@ -128,6 +129,8 @@ The bootstrap checks whether `POOLER_AUTH_ROLE` exists and does nothing when it 
 **Pooler access requires an admin role that can read `pg_authid`, which in practice means `SUPERUSER`.** The lookup function runs as the admin role, and `pg_authid` is superuser-only — `pg_read_all_data` does not cover it. A `CREATEROLE` admin can create the function and have every call fail at client login, so provisioning calls the lookup and checks the pooler role's `USAGE` and `EXECUTE` before reporting `Ready`. If you want to run with a non-superuser admin, set `MIMIR_POSTGRES_POOLER_AUTH_ROLE=""` and point `MIMIR_POSTGRES_HOST` at the primary instead of the pooler.
 
 The failure mode this fixes was silent: pgBouncer reports the failed lookup to the client as `permission denied for database "x"`, which is exactly what a correctly refused cross-tenant attempt looks like.
+
+`ADMIN_USER` is available for every engine, not just MySQL — Postgres simply does not need it, because Percona's Secret already carries a `user` key.
 
 The pattern is `MIMIR_<ENGINE>_*`, so MySQL takes the same variables with different defaults — but **its admin credential is shaped differently**, and that is worth reading before wiring it:
 
