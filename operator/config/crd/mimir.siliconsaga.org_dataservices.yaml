@@ -58,11 +58,23 @@ spec:
           metadata:
             type: object
           spec:
-            description: DataServiceSpec describes a requested data service.
+            description: |-
+              DataServiceSpec describes a requested data service.
+
+              Engine, placement and databaseName are IMMUTABLE after creation, enforced at
+              admission. Together they name a database that already exists and holds data,
+              so editing one does not move anything — it re-points the object at a
+              different database and silently abandons the first. Changing databaseName
+              would provision a second database and orphan the original; changing placement
+              would make cleanup skip the shared database entirely. Rejecting the edit is
+              the honest answer: delete the DataService and declare a new one.
             properties:
               databaseName:
                 description: |-
-                  DatabaseName is the database to create. Defaults to metadata.name.
+                  DatabaseName is the database to create. When unset, it is derived from
+                  the namespace AND the object name — not from metadata.name alone, since
+                  on a shared cluster nothing else keeps two identically-named requests in
+                  different namespaces apart.
 
                   Must be a valid unquoted PostgreSQL identifier, which is stricter than a
                   Kubernetes name: no leading digit, and underscores rather than hyphens.
@@ -71,6 +83,10 @@ spec:
                 maxLength: 63
                 pattern: ^[a-z_][a-z0-9_]*$
                 type: string
+                x-kubernetes-validations:
+                - message: databaseName is immutable once provisioned — delete and
+                    recreate the DataService instead
+                  rule: self == oldSelf
               engine:
                 description: Engine is which kind of data service to provision.
                 enum:
@@ -78,6 +94,10 @@ spec:
                 - mysql
                 - mongodb
                 type: string
+                x-kubernetes-validations:
+                - message: engine is immutable once provisioned — delete and recreate
+                    the DataService instead
+                  rule: self == oldSelf
               extensions:
                 description: Extensions to enable in the database. PostgreSQL only.
                 items:
@@ -92,6 +112,10 @@ spec:
                 - shared
                 - dedicated
                 type: string
+                x-kubernetes-validations:
+                - message: placement is immutable once provisioned — delete and recreate
+                    the DataService instead
+                  rule: self == oldSelf
               version:
                 description: |-
                   Version pins the engine's major version.
@@ -185,6 +209,18 @@ spec:
               port:
                 format: int32
                 type: integer
+              provisionedDatabase:
+                description: |-
+                  ProvisionedDatabase is the physical database name that was actually
+                  created, recorded at provisioning time.
+
+                  Deletion reads THIS rather than re-deriving from the spec. Re-derivation
+                  cleans up whatever the spec says today, which is not necessarily what
+                  exists: an edited databaseName would leave the original database behind
+                  and drop a name that may belong to someone else. The spec fields are
+                  immutable, so the two cannot normally diverge — this is the belt to that
+                  braces, and it also covers objects created before the rule existed.
+                type: string
               secretName:
                 description: |-
                   SecretName is the Secret in this namespace holding the connection

@@ -92,13 +92,16 @@ spec:
                 - ReadWriteOnce
               resources:
                 requests:
-                  # Derived, not guessed. The repo must hold the retained fulls
-                  # plus the week's differentials plus WAL:
+                  # Derived, not guessed — and the peak is RETENTION PLUS ONE.
+                  # pgBackRest cannot expire the oldest retained full until its
+                  # replacement has completed successfully, so the moment before
+                  # expiry the repo holds three fulls, not two. Budgeting for
+                  # two is how the weekly backup fails partway through the third:
                   #
-                  #   2 fulls x 10Gi data = 20Gi   worst case, zero compression
-                  #   + differentials and WAL      ~10Gi headroom
-                  #   ------------------------------------------------
-                  #                                 30Gi
+                  #   (2 retained + 1 in flight) x 10Gi = 30Gi   zero compression
+                  #   + differentials and WAL                    ~10Gi headroom
+                  #   -------------------------------------------------------
+                  #                                               40Gi
                   #
                   # Deliberately sized for INCOMPRESSIBLE data. pgBackRest
                   # compresses, and real Postgres content compresses well, but a
@@ -110,7 +113,7 @@ spec:
                   # An earlier revision paired 4 fulls with a 20Gi repo against a
                   # 20Gi data volume, which could not hold even one worst-case
                   # full. Change data size, retention and this number together.
-                  storage: 30Gi
+                  storage: 40Gi
       # NOTE: repo1 is a LOCAL PVC. There is no offsite copy, so this survives
       # a pod restart but not the loss of the cluster. Deliberate for now and
       # recorded rather than implied — see the design's "Deferred, with the

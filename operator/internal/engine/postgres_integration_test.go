@@ -88,7 +88,7 @@ func cleanup(t *testing.T, tgt Target, database string) {
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if err := (Postgres{}).Drop(ctx, tgt, database); err != nil {
+		if err := (Postgres{}).Drop(ctx, tgt, database, ""); err != nil {
 			t.Errorf("cleanup: dropping %q left state behind: %v", database, err)
 		}
 	})
@@ -208,6 +208,98 @@ func TestRefusesToAdoptAnotherOwnersDatabase(t *testing.T) {
 	}
 }
 
+// TestDropRefusesAnotherOwnersDatabase covers the data-loss path that the
+// conflict handling itself opened.
+//
+// The finalizer is added BEFORE Ensure runs, so a DataService that loses an
+// ownership conflict still carries one. Deleting that rejected object called
+// Drop by name — and destroyed the winner's database. A mismatched marker must
+// mean "nothing here is mine", leaving both database and role untouched.
+func TestDropRefusesAnotherOwnersDatabase(t *testing.T) {
+	tgt := testTarget(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	p := Postgres{}
+	db := testDB(t, "tenant_victim")
+
+	owner, err := p.Ensure(ctx, tgt, db, "", Options{Owner: "team-a/app"})
+	if err != nil {
+		t.Fatalf("provisioning for team-a: %v", err)
+	}
+	cleanup(t, tgt, db)
+
+	// The loser of the conflict tries to clean up on deletion.
+	if err := p.Drop(ctx, tgt, db, "team-b/app"); err != nil {
+		t.Fatalf("Drop by a non-owner should be a no-op, got %v", err)
+	}
+
+	// The database must still exist and still work for its real owner.
+	if err := connectAs(ctx, tgt, owner.Username, owner.Password, db); err != nil {
+		t.Fatalf("DATA LOSS: a non-owner's delete destroyed the owner's database: %v", err)
+	}
+
+	// And the owner can still drop it.
+	if err := p.Drop(ctx, tgt, db, "team-a/app"); err != nil {
+		t.Fatalf("owner cannot drop its own database: %v", err)
+	}
+
+	admin, err := pgx.Connect(ctx, adminURI(tgt))
+	if err != nil {
+		t.Fatalf("admin connect: %v", err)
+	}
+	defer admin.Close(ctx)
+	var n int
+	if err := admin.QueryRow(ctx,
+		"SELECT count(*) FROM pg_database WHERE datname = $1", db).Scan(&n); err != nil {
+		t.Fatalf("querying pg_database: %v", err)
+	}
+	if n != 0 {
+		t.Error("owner's own Drop did not remove the database")
+	}
+}
+
+// TestRefusesToAdoptAnUnmarkedRole guards the privilege-escalation shape of the
+// same problem. Adopting an existing role by name hands the tenant whatever
+// that role already carries, and then publishes a password for it.
+func TestRefusesToAdoptAnUnmarkedRole(t *testing.T) {
+	tgt := testTarget(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	name := testDB(t, "tenant_roleclash")
+
+	admin, err := pgx.Connect(ctx, adminURI(tgt))
+	if err != nil {
+		t.Fatalf("admin connect: %v", err)
+	}
+	defer admin.Close(ctx)
+
+	// A role that predates the operator, as a hand-made one would.
+	if _, err := admin.Exec(ctx, "CREATE ROLE "+quoteIdentifier(name)+" WITH LOGIN"); err != nil {
+		t.Fatalf("seeding a hand-made role: %v", err)
+	}
+	t.Cleanup(func() {
+		cctx, ccancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer ccancel()
+		c, err := pgx.Connect(cctx, adminURI(tgt))
+		if err != nil {
+			t.Errorf("cleanup: cannot reach the server to drop role %q: %v", name, err)
+			return
+		}
+		defer c.Close(cctx)
+		if _, err := c.Exec(cctx, "DROP ROLE IF EXISTS "+quoteIdentifier(name)); err != nil {
+			t.Errorf("cleanup: dropping role %q left state behind: %v", name, err)
+		}
+	})
+
+	_, err = Postgres{}.Ensure(ctx, tgt, name, "", Options{Owner: "team-a/app"})
+	var notOwned *ErrNotOwned
+	if !errors.As(err, &notOwned) {
+		t.Fatalf("expected an ownership conflict for an unmarked role, got %v", err)
+	}
+}
+
 // A database created by hand, with no marker, must also be left alone —
 // adopting it would hand a tenant data the operator did not create.
 func TestRefusesUnmarkedPreExistingDatabase(t *testing.T) {
@@ -301,7 +393,7 @@ func TestDropRemovesEverything(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
-	if err := p.Drop(ctx, tgt, dropDB); err != nil {
+	if err := p.Drop(ctx, tgt, dropDB, ""); err != nil {
 		t.Fatalf("Drop: %v", err)
 	}
 

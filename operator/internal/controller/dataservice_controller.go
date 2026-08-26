@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -193,6 +194,9 @@ func (r *DataServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	ds.Status.Phase = "Ready"
 	ds.Status.SecretName = secretName
+	// Record what was actually provisioned, so deletion cleans up that rather
+	// than re-deriving from a spec that may have been edited.
+	ds.Status.ProvisionedDatabase = dbName
 	ds.Status.Host = creds.Host
 	ds.Status.Port = creds.Port
 	r.setReady(&ds, metav1.ConditionTrue, mimirv1alpha1.ReasonProvisioned,
@@ -215,6 +219,14 @@ func (r *DataServiceReconciler) validate(ds *mimirv1alpha1.DataService) error {
 	}
 	if len(ds.Spec.Extensions) > 0 && ds.Spec.Engine != mimirv1alpha1.EnginePostgres {
 		return fmt.Errorf("spec.extensions is only valid for engine: postgres")
+	}
+	// Checked here, before the finalizer and before Ensure. Validating only at
+	// the point of use meant a typo was found after the role, database, marker,
+	// password and grants had all been written — leaving partial state, and
+	// retrying every thirty seconds on a spec that can never succeed. It is a
+	// terminal InvalidSpec, so it should be terminal from the start.
+	if err := engine.ValidateExtensions(ds.Spec.Extensions); err != nil {
+		return err
 	}
 	// Validate the name that will actually be used, not just the field. The
 	// CRD pattern constrains spec.databaseName, but when it is unset the name
@@ -245,7 +257,7 @@ func (r *DataServiceReconciler) reconcileDelete(ctx context.Context, ds *mimirv1
 		if err := r.dropShared(ctx, ds); err != nil {
 			if !force {
 				l.Error(err, "cannot drop database; keeping finalizer so the data is not orphaned",
-					"database", ds.ResolvedDatabaseName(),
+					"database", ds.Status.ProvisionedDatabase,
 					"override", forceDeleteAnnotation+"=true")
 				return ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
 			}
@@ -269,20 +281,31 @@ func (r *DataServiceReconciler) reconcileDelete(ctx context.Context, ds *mimirv1
 // caller's comment says it prevents, and the leftover name then blocks the
 // next request for it with an ownership conflict.
 func (r *DataServiceReconciler) dropShared(ctx context.Context, ds *mimirv1alpha1.DataService) error {
+	// Nothing was ever provisioned — a request that failed validation, or lost
+	// an ownership conflict before Ensure returned. There is no database of
+	// ours to drop, and guessing a name here is how the conflict-losing object
+	// would delete the winner's database.
+	db := ds.Status.ProvisionedDatabase
+	if db == "" {
+		return nil
+	}
+
 	prov, ok := r.Registry.For(ds.Spec.Engine)
 	if !ok {
-		return fmt.Errorf("no provisioner for engine %q in this build, so the database cannot be dropped", ds.Spec.Engine)
+		return fmt.Errorf("no provisioner for engine %q in this build, so %q cannot be dropped", ds.Spec.Engine, db)
 	}
 	shared, hasCluster := r.SharedClusters[ds.Spec.Engine]
 	if !hasCluster {
-		return fmt.Errorf("no shared cluster configured for engine %q, so the database cannot be dropped", ds.Spec.Engine)
+		return fmt.Errorf("no shared cluster configured for engine %q, so %q cannot be dropped", ds.Spec.Engine, db)
 	}
 
 	target, err := r.resolveTarget(ctx, shared)
 	if err != nil {
 		return err
 	}
-	return prov.Drop(ctx, target, ds.ResolvedDatabaseName())
+	// The owner is passed so the provisioner refuses to drop a database that
+	// is not ours, even if the name matches.
+	return prov.Drop(ctx, target, db, ds.Owner())
 }
 
 // resolveTarget reads the admin credentials for a shared cluster.
@@ -350,13 +373,18 @@ func (r *DataServiceReconciler) writeSecret(ctx context.Context, ds *mimirv1alph
 		secret.Labels["mimir.siliconsaga.org/dataservice"] = ds.Name
 
 		secret.Type = corev1.SecretTypeOpaque
-		secret.StringData = map[string]string{
-			"host":     c.Host,
-			"port":     fmt.Sprintf("%d", c.Port),
-			"database": c.Database,
-			"username": c.Username,
-			"password": c.Password,
-			"uri":      c.URI,
+		// Data, not StringData. StringData is write-only — a GET never returns
+		// it — so CreateOrUpdate compares an always-empty field against a
+		// populated one and issues an update on every single reconcile, even
+		// when nothing changed. Writing Data makes the comparison stable and
+		// the reconcile a genuine no-op in the common case.
+		secret.Data = map[string][]byte{
+			"host":     []byte(c.Host),
+			"port":     []byte(strconv.Itoa(int(c.Port))),
+			"database": []byte(c.Database),
+			"username": []byte(c.Username),
+			"password": []byte(c.Password),
+			"uri":      []byte(c.URI),
 		}
 		// Owner reference so the Secret is garbage-collected with the request.
 		return controllerutil.SetControllerReference(ds, secret, r.Scheme)
@@ -400,9 +428,19 @@ func (r *DataServiceReconciler) patchStatus(ctx context.Context, ds *mimirv1alph
 }
 
 // SetupWithManager wires the controller up.
+//
+// Deliberately NOT Owns(&corev1.Secret{}). That builds a Secret informer, which
+// LISTs and WATCHes the type cluster-wide — permissions this operator no longer
+// holds, and deliberately so. The manager would then block forever waiting for
+// a cache it cannot fill, which presents as an operator that starts and does
+// nothing rather than as a permissions error.
+//
+// The cost is latency, not correctness: a published Secret deleted by hand is
+// restored on the next reconcile rather than immediately, and the
+// OwnerReference still garbage-collects it with the DataService. Watching every
+// Secret in the cluster to notice edits to our own is a poor trade.
 func (r *DataServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&mimirv1alpha1.DataService{}).
-		Owns(&corev1.Secret{}).
 		Complete(r)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -96,6 +97,21 @@ func (p Postgres) Ensure(ctx context.Context, t Target, database, current string
 			return creds, fmt.Errorf("create role %q: %w", role, err)
 		}
 	} else {
+		// Roles carry an ownership marker too, and for a sharper reason than
+		// databases. Adopting an existing role by name alone hands the new
+		// tenant whatever that role already has — memberships, SUPERUSER,
+		// ownership of other schemas — and ALTER ROLE ... PASSWORD publishes a
+		// credential for it. A dangling or hand-made role would become a
+		// privilege escalation delivered in a Secret.
+		if opts.Owner != "" {
+			marker, err := p.roleOwnerMarker(ctx, conn, role)
+			if err != nil {
+				return creds, err
+			}
+			if marker != opts.Owner {
+				return creds, &ErrNotOwned{Database: role, Want: opts.Owner, Got: marker}
+			}
+		}
 		if _, err := conn.Exec(ctx,
 			fmt.Sprintf("ALTER ROLE %s WITH LOGIN PASSWORD %s", qRole, quoteLiteral(password)),
 		); err != nil {
@@ -103,9 +119,23 @@ func (p Postgres) Ensure(ctx context.Context, t Target, database, current string
 		}
 	}
 
-	if !dbExists {
+	if opts.Owner != "" {
 		if _, err := conn.Exec(ctx,
-			fmt.Sprintf("CREATE DATABASE %s OWNER %s", qDB, qRole),
+			fmt.Sprintf("COMMENT ON ROLE %s IS %s", qRole, quoteLiteral(ownerMarkerPrefix+opts.Owner)),
+		); err != nil {
+			return creds, fmt.Errorf("record owner on role %q: %w", role, err)
+		}
+	}
+
+	if !dbExists {
+		// ALLOW_CONNECTIONS false closes the window between creation and the
+		// REVOKE below. A new database accepts connections from every role on
+		// the cluster by default, so without this it is briefly readable by
+		// every other tenant — and if the process dies in that gap, it stays
+		// that way until a later reconcile happens to succeed. Connections are
+		// enabled again only once the grants are correct.
+		if _, err := conn.Exec(ctx,
+			fmt.Sprintf("CREATE DATABASE %s OWNER %s ALLOW_CONNECTIONS false", qDB, qRole),
 		); err != nil {
 			return creds, fmt.Errorf("create database %q: %w", database, err)
 		}
@@ -135,6 +165,17 @@ func (p Postgres) Ensure(ctx context.Context, t Target, database, current string
 		return creds, fmt.Errorf("grant on %q: %w", database, err)
 	}
 
+	// Grants are correct now, so the database can accept connections. Runs
+	// every reconcile rather than only after creation, so a database left
+	// closed by an interrupted earlier pass is repaired rather than stranded.
+	if _, err := conn.Exec(ctx,
+		fmt.Sprintf("ALTER DATABASE %s WITH ALLOW_CONNECTIONS true", qDB),
+	); err != nil {
+		return creds, fmt.Errorf("enable connections on %q: %w", database, err)
+	}
+
+	// Extensions come after connections are enabled — ensureExtensions has to
+	// connect to the tenant database itself.
 	if len(opts.Extensions) > 0 {
 		if err := p.ensureExtensions(ctx, t, database, opts.Extensions); err != nil {
 			return creds, err
@@ -172,6 +213,42 @@ func (Postgres) databaseOwnerMarker(ctx context.Context, conn *pgx.Conn, databas
 		return "", nil
 	}
 	return strings.TrimPrefix(*comment, ownerMarkerPrefix), nil
+}
+
+// roleOwnerMarker returns the owner recorded on a role, or "" when there is no
+// marker — meaning the role was created outside the operator.
+func (Postgres) roleOwnerMarker(ctx context.Context, conn *pgx.Conn, role string) (string, error) {
+	var comment *string
+	if err := conn.QueryRow(ctx,
+		`SELECT shobj_description(oid, 'pg_authid') FROM pg_authid WHERE rolname = $1`,
+		role,
+	).Scan(&comment); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", nil
+		}
+		return "", fmt.Errorf("read owner marker on role %q: %w", role, err)
+	}
+	if comment == nil || !strings.HasPrefix(*comment, ownerMarkerPrefix) {
+		return "", nil
+	}
+	return strings.TrimPrefix(*comment, ownerMarkerPrefix), nil
+}
+
+// ValidateExtensions reports whether every requested extension is allowed.
+//
+// Exported so the controller can reject a bad request up front, as a terminal
+// InvalidSpec, rather than discovering it at the very end of Ensure — after the
+// role, database, marker, password and grants have all been mutated, leaving
+// partial state behind and retrying every thirty seconds on a spec that can
+// never succeed.
+func ValidateExtensions(exts []string) error {
+	for _, ext := range exts {
+		if !allowedExtensions[ext] {
+			return fmt.Errorf("extension %q is not on the allowlist for shared clusters (allowed: %s)",
+				ext, strings.Join(AllowedExtensions(), ", "))
+		}
+	}
+	return nil
 }
 
 // allowedExtensions is the set a tenant may request.
@@ -216,15 +293,14 @@ func (p Postgres) ensureExtensions(ctx context.Context, t Target, database strin
 	}
 	defer func() { _ = conn.Close(ctx) }()
 
+	// Re-checked here as well as in the controller: this is the boundary that
+	// actually reaches an administrative connection, and it must not depend on
+	// a caller having validated first.
+	if err := ValidateExtensions(exts); err != nil {
+		return err
+	}
+
 	for _, ext := range exts {
-		// Exact membership of a fixed set, not a character-class check. That
-		// is strictly stronger than ValidateIdentifier, and it also admits
-		// legitimate hyphenated names like uuid-ossp that the identifier rule
-		// would have rejected outright.
-		if !allowedExtensions[ext] {
-			return fmt.Errorf("extension %q is not on the allowlist for shared clusters (allowed: %s)",
-				ext, strings.Join(AllowedExtensions(), ", "))
-		}
 		if _, err := conn.Exec(ctx,
 			fmt.Sprintf("CREATE EXTENSION IF NOT EXISTS %s", quoteIdentifier(ext)),
 		); err != nil {
@@ -234,8 +310,18 @@ func (p Postgres) ensureExtensions(ctx context.Context, t Target, database strin
 	return nil
 }
 
-// Drop removes the database and its role.
-func (p Postgres) Drop(ctx context.Context, t Target, database string) error {
+// Drop removes the database and its role, but ONLY if owner matches the marker
+// recorded at creation.
+//
+// The ownership check here is not symmetry with Ensure — it closes a data-loss
+// path that the conflict handling itself opened. The finalizer is added before
+// Ensure runs, so a DataService that loses an ownership conflict still carries
+// one. Deleting that rejected object used to call Drop by name and destroy the
+// *legitimate* tenant's database. A mismatch is therefore "nothing here belongs
+// to me", not an error: there is nothing to clean up, and deletion proceeds.
+//
+// An empty owner skips the check, for callers with no marker to match.
+func (p Postgres) Drop(ctx context.Context, t Target, database, owner string) error {
 	if err := ValidateIdentifier(database); err != nil {
 		return err
 	}
@@ -245,6 +331,26 @@ func (p Postgres) Drop(ctx context.Context, t Target, database string) error {
 	}
 	defer func() { _ = conn.Close(ctx) }()
 
+	if owner != "" {
+		var exists bool
+		if err := conn.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)`, database,
+		).Scan(&exists); err != nil {
+			return fmt.Errorf("check database %q: %w", database, err)
+		}
+		if exists {
+			marker, err := p.databaseOwnerMarker(ctx, conn, database)
+			if err != nil {
+				return err
+			}
+			if marker != owner {
+				// Someone else's database, or one made by hand. Leave both it
+				// and the role alone.
+				return nil
+			}
+		}
+	}
+
 	// WITH (FORCE) terminates existing sessions. Without it a single idle
 	// client holds the drop open indefinitely and deletion hangs on a
 	// finalizer with no obvious cause.
@@ -252,6 +358,18 @@ func (p Postgres) Drop(ctx context.Context, t Target, database string) error {
 		fmt.Sprintf("DROP DATABASE IF EXISTS %s WITH (FORCE)", quoteIdentifier(database)),
 	); err != nil {
 		return fmt.Errorf("drop database %q: %w", database, err)
+	}
+
+	// The role is dropped only when we own it too, checked separately because a
+	// role can outlive its database.
+	if owner != "" {
+		marker, err := p.roleOwnerMarker(ctx, conn, database)
+		if err != nil {
+			return err
+		}
+		if marker != owner {
+			return nil
+		}
 	}
 	if _, err := conn.Exec(ctx,
 		fmt.Sprintf("DROP ROLE IF EXISTS %s", quoteIdentifier(database)),

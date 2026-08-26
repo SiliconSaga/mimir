@@ -69,9 +69,13 @@ type Provisioner interface {
 	// every consumer that cached it.
 	Ensure(ctx context.Context, t Target, database string, current string, opts Options) (Credentials, error)
 
-	// Drop removes what Ensure created. Called on deletion when the object's
-	// reclaim policy asks for it.
-	Drop(ctx context.Context, t Target, database string) error
+	// Drop removes what Ensure created, but only what the given owner owns.
+	//
+	// The owner is checked against the marker recorded at creation, and a
+	// mismatch means "nothing here is mine" rather than an error. Without it,
+	// deleting a DataService that lost an ownership conflict would drop the
+	// database belonging to the one that won. An empty owner skips the check.
+	Drop(ctx context.Context, t Target, database, owner string) error
 }
 
 // Options carries the engine-specific extras from the spec.

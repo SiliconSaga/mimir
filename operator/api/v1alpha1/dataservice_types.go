@@ -40,20 +40,33 @@ const (
 )
 
 // DataServiceSpec describes a requested data service.
+//
+// Engine, placement and databaseName are IMMUTABLE after creation, enforced at
+// admission. Together they name a database that already exists and holds data,
+// so editing one does not move anything — it re-points the object at a
+// different database and silently abandons the first. Changing databaseName
+// would provision a second database and orphan the original; changing placement
+// would make cleanup skip the shared database entirely. Rejecting the edit is
+// the honest answer: delete the DataService and declare a new one.
 type DataServiceSpec struct {
 	// Engine is which kind of data service to provision.
 	//
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="engine is immutable once provisioned — delete and recreate the DataService instead"
 	Engine Engine `json:"engine"`
 
 	// Placement decides whether this lands in the shared cluster for its engine
 	// or in a dedicated one in this namespace.
 	//
 	// +kubebuilder:default=shared
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="placement is immutable once provisioned — delete and recreate the DataService instead"
 	// +optional
 	Placement Placement `json:"placement,omitempty"`
 
-	// DatabaseName is the database to create. Defaults to metadata.name.
+	// DatabaseName is the database to create. When unset, it is derived from
+	// the namespace AND the object name — not from metadata.name alone, since
+	// on a shared cluster nothing else keeps two identically-named requests in
+	// different namespaces apart.
 	//
 	// Must be a valid unquoted PostgreSQL identifier, which is stricter than a
 	// Kubernetes name: no leading digit, and underscores rather than hyphens.
@@ -62,6 +75,7 @@ type DataServiceSpec struct {
 	//
 	// +kubebuilder:validation:Pattern=`^[a-z_][a-z0-9_]*$`
 	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="databaseName is immutable once provisioned — delete and recreate the DataService instead"
 	// +optional
 	DatabaseName string `json:"databaseName,omitempty"`
 
@@ -102,6 +116,18 @@ type DataServiceStatus struct {
 	Host string `json:"host,omitempty"`
 	// +optional
 	Port int32 `json:"port,omitempty"`
+
+	// ProvisionedDatabase is the physical database name that was actually
+	// created, recorded at provisioning time.
+	//
+	// Deletion reads THIS rather than re-deriving from the spec. Re-derivation
+	// cleans up whatever the spec says today, which is not necessarily what
+	// exists: an edited databaseName would leave the original database behind
+	// and drop a name that may belong to someone else. The spec fields are
+	// immutable, so the two cannot normally diverge — this is the belt to that
+	// braces, and it also covers objects created before the rule existed.
+	// +optional
+	ProvisionedDatabase string `json:"provisionedDatabase,omitempty"`
 
 	// ObservedGeneration is the spec generation this status reflects.
 	//
