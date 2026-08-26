@@ -1,0 +1,9 @@
+# The platform's shared data clusters — the servers that DataService vends
+# databases out of.
+#
+# Separate from the operator so that pruning one can never delete the other.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - postgres-cluster.yaml

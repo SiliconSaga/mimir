@@ -1,0 +1,87 @@
+# Three assertions, in order of how easy they are to get wrong:
+#
+#   1. tenant-a can use its OWN database          — the happy path
+#   2. tenant-a CANNOT connect to tenant-b's      — the isolation claim
+#   3. the published Secret's URI actually works  — the contract consumers use
+#
+# Assertion 2 is the one that matters. It is written as "the command must
+# fail", which is easy to make pass accidentally — so it also insists on a
+# database AUTHORIZATION error rather than accepting any non-zero exit.
+#
+# Credentials reach the test pods through `envFrom.secretRef`, never through
+# argv or a literal `--env`. Both of those put the plaintext value in the Pod
+# spec, where `kubectl describe pod` prints it back and the API server records
+# it — the disclosure an earlier revision moved around rather than removed.
+# With envFrom, the Secret's keys arrive as $host, $port, $database,
+# $username, $password and $uri inside the container, and the manifest holds
+# only a Secret name.
+apiVersion: kuttl.dev/v1beta1
+kind: TestStep
+timeout: 180
+commands:
+  # 1. Own database is usable, for both DDL and DML — `GRANT ALL` is part of
+  #    the contract, not just the ability to connect.
+  #
+  #    The SQL deliberately uses no string literals, so it survives the trip
+  #    through JSON and the shell without quoting games.
+  - script: |
+      set -euo pipefail
+      NS="$NAMESPACE"
+
+      kubectl run isolation-own --rm -i --restart=Never -n "$NS" \
+        --image=postgres:15 \
+        --overrides='{"spec":{"containers":[{"name":"isolation-own","image":"postgres:15","envFrom":[{"secretRef":{"name":"tenant-a-dataservice"}}],"command":["sh","-c","psql \"$uri\" -tAc \"CREATE TABLE IF NOT EXISTS canary (v int); INSERT INTO canary VALUES (1); SELECT count(*) FROM canary;\""]}]}}' \
+        | grep -Eq '^[0-9]+$'
+
+      echo "ok: tenant-a can create, write and read in its own database"
+
+  # 2. THE ISOLATION ASSERTION. tenant-a's credentials must be refused by
+  #    tenant-b's database. Without REVOKE CONNECT ... FROM PUBLIC this
+  #    succeeds, and the shared cluster is shared data.
+  - script: |
+      set -euo pipefail
+      NS="$NAMESPACE"
+      B_DB=$(kubectl get secret tenant-b-dataservice -n "$NS" -o jsonpath='{.data.database}' | base64 -d)
+
+      # Only tenant-b's DATABASE NAME is passed as a literal — it is not a
+      # credential. tenant-a's own password arrives via envFrom.
+      OVERRIDES=$(printf '{"spec":{"containers":[{"name":"isolation-cross","image":"postgres:15","envFrom":[{"secretRef":{"name":"tenant-a-dataservice"}}],"env":[{"name":"TARGET_DB","value":"%s"}],"command":["sh","-c","PGPASSWORD=$password PGSSLMODE=require psql -h $host -p $port -U $username -d $TARGET_DB -tAc \\"SELECT 1\\""]}]}}' "$B_DB")
+
+      set +e
+      OUT=$(kubectl run isolation-cross --rm -i --restart=Never -n "$NS" \
+        --image=postgres:15 --overrides="$OVERRIDES" 2>&1)
+      RC=$?
+      set -e
+
+      if [ "$RC" -eq 0 ]; then
+        echo "ISOLATION FAILURE: tenant-a connected to tenant-b's database" >&2
+        echo "$OUT" >&2
+        exit 1
+      fi
+
+      # Insist on the RIGHT failure, and specifically on an AUTHORIZATION one.
+      #
+      # Accepting "authentication failed" or "no pg_hba" would be too generous:
+      # a wrong password or a pg_hba misconfiguration produces those and would
+      # pass while proving nothing about REVOKE CONNECT. A typo in the host
+      # exits non-zero too. Only a database-level permission refusal counts.
+      if ! echo "$OUT" | grep -Eqi 'permission denied for database|does not have CONNECT privilege'; then
+        echo "connection failed, but not by the grant model:" >&2
+        echo "$OUT" >&2
+        exit 1
+      fi
+
+      echo "ok: tenant-a is refused by tenant-b's database"
+
+  # 3. The published URI is what consumers are told to use, so it has to work
+  #    verbatim rather than only after reassembly.
+  - script: |
+      set -euo pipefail
+      NS="$NAMESPACE"
+
+      kubectl run isolation-uri --rm -i --restart=Never -n "$NS" \
+        --image=postgres:15 \
+        --overrides='{"spec":{"containers":[{"name":"isolation-uri","image":"postgres:15","envFrom":[{"secretRef":{"name":"tenant-a-dataservice"}}],"command":["sh","-c","psql \"$uri\" -tAc \"SELECT current_database();\""]}]}}' \
+        | tr -d '[:space:]' | grep -q .
+
+      echo "ok: the published URI connects as published"

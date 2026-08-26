@@ -1,0 +1,247 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.16.5
+  name: dataservices.mimir.siliconsaga.org
+spec:
+  group: mimir.siliconsaga.org
+  names:
+    kind: DataService
+    listKind: DataServiceList
+    plural: dataservices
+    shortNames:
+    - dsvc
+    singular: dataservice
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.engine
+      name: Engine
+      type: string
+    - jsonPath: .spec.placement
+      name: Placement
+      type: string
+    - jsonPath: .spec.databaseName
+      name: Database
+      type: string
+    - jsonPath: .status.secretName
+      name: Secret
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: DataService is a request for a database inside an existing server.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              DataServiceSpec describes a requested data service.
+
+              Engine, placement and databaseName are IMMUTABLE after creation, enforced at
+              admission. Together they name a database that already exists and holds data,
+              so editing one does not move anything — it re-points the object at a
+              different database and silently abandons the first. Changing databaseName
+              would provision a second database and orphan the original; changing placement
+              would make cleanup skip the shared database entirely. Rejecting the edit is
+              the honest answer: delete the DataService and declare a new one.
+
+              The presence rule below is separate from the per-field ones and is NOT
+              redundant. Kubernetes skips a field-level transition rule whenever the field
+              is absent from either the old or the new object, so `self == oldSelf` on an
+              optional field does not stop it being ADDED after creation. Without this,
+              setting databaseName on an object that had none would provision a second
+              database under the new name while the originally derived one — still the
+              value in status.provisionedDatabase — is orphaned for good.
+            properties:
+              databaseName:
+                description: |-
+                  DatabaseName is the database to create. When unset, it is derived from
+                  the namespace AND the object name — not from metadata.name alone, since
+                  on a shared cluster nothing else keeps two identically-named requests in
+                  different namespaces apart.
+
+                  Must be a valid unquoted PostgreSQL identifier, which is stricter than a
+                  Kubernetes name: no leading digit, and underscores rather than hyphens.
+                  Enforced here so a bad name fails at admission rather than deep inside a
+                  reconcile as a syntax error.
+                maxLength: 63
+                pattern: ^[a-z_][a-z0-9_]*$
+                type: string
+                x-kubernetes-validations:
+                - message: databaseName is immutable once provisioned — delete and
+                    recreate the DataService instead
+                  rule: self == oldSelf
+              engine:
+                description: Engine is which kind of data service to provision.
+                enum:
+                - postgres
+                - mysql
+                - mongodb
+                type: string
+                x-kubernetes-validations:
+                - message: engine is immutable once provisioned — delete and recreate
+                    the DataService instead
+                  rule: self == oldSelf
+              extensions:
+                description: Extensions to enable in the database. PostgreSQL only.
+                items:
+                  type: string
+                type: array
+              placement:
+                default: shared
+                description: |-
+                  Placement decides whether this lands in the shared cluster for its engine
+                  or in a dedicated one in this namespace.
+                enum:
+                - shared
+                - dedicated
+                type: string
+                x-kubernetes-validations:
+                - message: placement is immutable once provisioned — delete and recreate
+                    the DataService instead
+                  rule: self == oldSelf
+              version:
+                description: |-
+                  Version pins the engine's major version.
+
+                  Only legal with placement: dedicated. A shared cluster runs one version
+                  for every tenant, so accepting this there would be a promise the API
+                  cannot keep — and silently ignoring it is the dead-config failure mode
+                  that looks correct for months. An app that genuinely needs a different
+                  version is telling us it needs a dedicated cluster.
+                type: string
+            required:
+            - engine
+            type: object
+            x-kubernetes-validations:
+            - message: databaseName cannot be added or removed after creation — delete
+                and recreate the DataService instead
+              rule: has(self.databaseName) == has(oldSelf.databaseName)
+          status:
+            description: DataServiceStatus reports what was provisioned.
+            properties:
+              conditions:
+                description: |-
+                  Conditions follow the standard Kubernetes convention. Ready means the
+                  database, its role and its Secret all exist and agree.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              host:
+                description: Host and Port are where the database actually answers.
+                type: string
+              observedGeneration:
+                description: ObservedGeneration is the spec generation this status
+                  reflects.
+                format: int64
+                type: integer
+              phase:
+                description: Phase is a coarse human-facing summary. Conditions carry
+                  the detail.
+                type: string
+              port:
+                format: int32
+                type: integer
+              provisionedDatabase:
+                description: |-
+                  ProvisionedDatabase is the physical database name that was actually
+                  created, recorded at provisioning time.
+
+                  Deletion reads THIS rather than re-deriving from the spec. Re-derivation
+                  cleans up whatever the spec says today, which is not necessarily what
+                  exists: an edited databaseName would leave the original database behind
+                  and drop a name that may belong to someone else. The spec fields are
+                  immutable, so the two cannot normally diverge — this is the belt to that
+                  braces, and it also covers objects created before the rule existed.
+                type: string
+              secretName:
+                description: |-
+                  SecretName is the Secret in this namespace holding the connection
+                  details. Reported here so consumers never have to guess the name —
+                  the same contract Strimzi's KafkaUser uses.
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

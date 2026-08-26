@@ -1,0 +1,12 @@
+# What ArgoCD applies to install the operator itself.
+#
+# Kustomize refuses to load files above its own directory, so this sits here
+# rather than under argocd/apps/ — the Application points at operator/config.
+# crd/ and rbac/ are controller-gen output; deploy/ is hand-written.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - crd/mimir.siliconsaga.org_dataservices.yaml
+  - rbac/role.yaml
+  - deploy/operator.yaml

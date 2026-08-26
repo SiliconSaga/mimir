@@ -1,0 +1,172 @@
+# The shared PostgreSQL cluster.
+#
+# One cluster, many databases — vended by the DataService operator rather than
+# by a claim per app. See docs/plans/2026-08-17-dataservice-vending-design.md.
+#
+# Declared as a plain manifest rather than composed from a claim: it is
+# infrastructure the platform owns, not something an app requests. A claim
+# would imply it could be provisioned more than once, which is exactly the
+# cluster-per-app model this replaces.
+apiVersion: pgv2.percona.com/v2
+kind: PerconaPGCluster
+metadata:
+  name: mimir-postgres
+  namespace: mimir
+spec:
+  image: "percona/percona-postgresql-operator:2.7.0-ppg15-postgres"
+  imagePullPolicy: Always
+  # Pinned at 15 to match every existing cluster, so the eventual rebuild of
+  # keycloak/ting/harbor onto this one is not also a major-version migration.
+  # A shared cluster serves one version for all tenants, which is why
+  # spec.version on a DataService is rejected under placement: shared.
+  postgresVersion: 15
+
+  instances:
+    - name: instance1
+      # SINGLE INSTANCE, and that is a stated limitation rather than an
+      # oversight: this cluster is a single point of failure for every tenant
+      # on it, which is strictly worse than the per-app clusters it replaces,
+      # where one failure cost one app.
+      #
+      # Deliberate for now. This platform is actively being de-contended and a
+      # standby would roughly double the reservation, so the trade is taken
+      # knowingly and written down. Raising this to 2 with a PodDisruptionBudget
+      # is the fix, and it belongs with the offsite-backup work below — both are
+      # prerequisites before anything load-bearing depends on this cluster.
+      replicas: 1
+      # Sized for the sum of its tenants plus connection overhead, not for one
+      # of the clusters it replaces. Measured p95 of the three existing
+      # single-tenant clusters: keycloak 77m/418Mi, ting 70m/336Mi,
+      # harbor 60m/487Mi. Forgejo is the fourth.
+      resources:
+        requests:
+          cpu: 250m
+          memory: 1Gi
+        limits:
+          cpu: "1"
+          memory: 2Gi
+      dataVolumeClaimSpec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            # 10Gi, and this number is load-bearing: it is the input to the
+            # backup repository sizing below, so the two cannot be changed
+            # independently. Twenty times current usage — Ting and Keycloak are
+            # both under 500Mi — and standard-rwo supports volume expansion, so
+            # growing later is a one-line change rather than a migration.
+            storage: 10Gi
+      initContainer:
+        image: percona/percona-postgresql-operator:2.7.0
+        containerSecurityContext:
+          runAsNonRoot: false
+
+  backups:
+    enabled: true
+    pgbackrest:
+      # pgBackRest ships in its OWN repository, not as a suffixed tag on the
+      # operator repo. This previously pointed at the PostgreSQL *server*
+      # image, which the repo-host would have run instead of pgBackRest —
+      # accepted by the API, then failing at backup time, which is the least
+      # visible failure this cluster can have.
+      #
+      # Verified against Docker Hub: percona/percona-postgresql-operator has no
+      # pgbackrest tag at 2.7.0 at all (only 2.6.0-ppg17 ones), while
+      # percona/percona-pgbackrest:2.55.0 was published in the same week as the
+      # 2.7.0 server images.
+      image: "percona/percona-pgbackrest:2.55.0"
+      # Requests here for the same reason as everywhere else on this cluster:
+      # BestEffort plus a health probe is a restart loop under contention, and
+      # this is the pod holding the backups.
+      repoHost:
+        resources:
+          requests:
+            cpu: 25m
+            memory: 64Mi
+          limits:
+            cpu: 250m
+            memory: 256Mi
+      # Retention, derived from the repository size rather than picked as a
+      # round number. Without any retention pgBackRest keeps every full backup
+      # until the volume fills, at which point backups start failing — the
+      # failure mode that stays invisible until a restore is attempted.
+      #
+      # 2 weekly fulls, so a fortnight of history. Fewer than the 4 first
+      # written here, because 4 was aspirational rather than affordable: see
+      # the arithmetic on repo1 below.
+      global:
+        repo1-retention-full: "2"
+        repo1-retention-full-type: count
+      repos:
+        - name: repo1
+          # Schedules are not optional here. pgBackRest takes an initial backup
+          # when the cluster is created and then, with no schedule, never takes
+          # another — so the repo would sit holding one increasingly stale copy
+          # while looking healthy.
+          schedules:
+            full: "0 1 * * 0"
+            differential: "0 1 * * 1-6"
+          volume:
+            volumeClaimSpec:
+              accessModes:
+                - ReadWriteOnce
+              resources:
+                requests:
+                  # Derived, not guessed — and the peak is RETENTION PLUS ONE.
+                  # pgBackRest cannot expire the oldest retained full until its
+                  # replacement has completed successfully, so the moment before
+                  # expiry the repo holds three fulls, not two. Budgeting for
+                  # two is how the weekly backup fails partway through the third:
+                  #
+                  #   (2 retained + 1 in flight) x 10Gi = 30Gi   zero compression
+                  #   + differentials and WAL                    ~10Gi headroom
+                  #   -------------------------------------------------------
+                  #                                               40Gi
+                  #
+                  # Deliberately sized for INCOMPRESSIBLE data. pgBackRest
+                  # compresses, and real Postgres content compresses well, but a
+                  # retention promise that only holds for compressible tenants
+                  # is one that fails on the tenant who stores encrypted blobs —
+                  # and it fails by silently dropping backups, which is the
+                  # least visible failure this platform can have.
+                  #
+                  # An earlier revision paired 4 fulls with a 20Gi repo against a
+                  # 20Gi data volume, which could not hold even one worst-case
+                  # full. Change data size, retention and this number together.
+                  storage: 40Gi
+      # NOTE: repo1 is a LOCAL PVC. There is no offsite copy, so this survives
+      # a pod restart but not the loss of the cluster. Deliberate for now and
+      # recorded rather than implied — see the design's "Deferred, with the
+      # risk stated". Consolidating concentrates that exposure: what used to
+      # cost one app its database now costs all of them. Mimir Phase 2 (an S3
+      # repo2 against Garage) is the fix, and Forgejo becoming load-bearing
+      # for GitOps is the moment it stops being optional.
+
+  proxy:
+    pgBouncer:
+      replicas: 1
+      # Not flagged in review, found while verifying the pgBackRest image
+      # above: this was an operator-2.6.0 artifact under a 2.7.0 operator. The
+      # tag exists and would pull, so the skew was invisible.
+      #
+      # Same pgBouncer version as before (1.24.0, per the 2.6.0-ppg15.12-
+      # pgbouncer1.24.0 tag it came from), moved to the standalone repository
+      # where Percona publishes it from 2.7.0 onward.
+      image: "percona/percona-pgbouncer:1.24.0"
+      resources:
+        requests:
+          cpu: 50m
+          memory: 128Mi
+        limits:
+          cpu: 250m
+          memory: 256Mi
+
+  users:
+    # The superuser the operator authenticates as to create databases and
+    # roles. Percona publishes its credentials to a Secret named
+    # <cluster>-pguser-<name>, which is what MIMIR_POSTGRES_ADMIN_SECRET points
+    # at. Tenant databases are NOT declared here — that is the operator's job,
+    # and listing them here is the shared-array contention the design rejected.
+    - name: postgres
+      databases:
+        - postgres

@@ -68,6 +68,19 @@ spec:
                     enabled: true
                     pgbackrest:
                       image: "percona/percona-postgresql-operator:2.7.0-ppg15-postgres"
+                      # The repo host ships with no requests, so it is BestEffort —
+                      # and BestEffort plus a health probe is a restart loop under
+                      # contention. ting-pg-repo-host reached 483 restarts while
+                      # using 16m. It is also the thing holding the backups, so it
+                      # is a poor candidate for being the first evicted.
+                      repoHost:
+                        resources:
+                          requests:
+                            cpu: 25m
+                            memory: 64Mi
+                          limits:
+                            cpu: 250m
+                            memory: 256Mi
                       repos:
                       - name: repo1
                         volume:

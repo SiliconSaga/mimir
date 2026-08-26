@@ -1,0 +1,35 @@
+# Two tenants on the shared cluster must not be able to reach each other.
+#
+# This is the assertion the whole shared-cluster model rests on: PostgreSQL
+# lets any role connect to any database by default, so "shared cluster" and
+# "shared data" are one REVOKE apart. If this test ever goes green for the
+# wrong reason, consolidation stops being safe.
+apiVersion: kuttl.dev/v1beta1
+kind: TestAssert
+timeout: 300
+---
+apiVersion: mimir.siliconsaga.org/v1alpha1
+kind: DataService
+metadata:
+  name: tenant-a
+status:
+  phase: Ready
+---
+apiVersion: mimir.siliconsaga.org/v1alpha1
+kind: DataService
+metadata:
+  name: tenant-b
+status:
+  phase: Ready
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: tenant-a-dataservice
+type: Opaque
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: tenant-b-dataservice
+type: Opaque

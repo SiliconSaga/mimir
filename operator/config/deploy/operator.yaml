@@ -1,0 +1,132 @@
+# DataService operator deployment.
+#
+# Runs in the mimir namespace beside the shared clusters it administers.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mimir-dataservice
+  namespace: mimir
+---
+# The controller reads Secrets cluster-wide (admin credentials live in mimir,
+# published credentials land in each consumer's namespace) and owns
+# DataService objects. Generated rules are in config/rbac/role.yaml; this
+# binds them cluster-wide because consumers live in arbitrary namespaces.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: mimir-dataservice
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: mimir-dataservice
+subjects:
+  - kind: ServiceAccount
+    name: mimir-dataservice
+    namespace: mimir
+---
+# Leader election needs its own lease permissions in the operator's namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mimir-dataservice-leader-election
+  namespace: mimir
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mimir-dataservice-leader-election
+  namespace: mimir
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: mimir-dataservice-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: mimir-dataservice
+    namespace: mimir
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mimir-dataservice
+  namespace: mimir
+  labels:
+    app.kubernetes.io/name: mimir-dataservice
+    app.kubernetes.io/part-of: mimir
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mimir-dataservice
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mimir-dataservice
+    spec:
+      serviceAccountName: mimir-dataservice
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: manager
+          image: ghcr.io/siliconsaga/mimir-dataservice:0.1.0
+          args:
+            - --leader-elect
+          env:
+            # What consumers connect to: the pooler.
+            - name: MIMIR_POSTGRES_HOST
+              value: mimir-postgres-pgbouncer.mimir.svc
+            - name: MIMIR_POSTGRES_PORT
+              value: "5432"
+            # Where DDL runs: the primary. CREATE DATABASE cannot run inside a
+            # transaction block, and a pooler in transaction mode wraps every
+            # statement in one — so this must NOT point at the pooler.
+            - name: MIMIR_POSTGRES_ADMIN_HOST
+              value: mimir-postgres-primary.mimir.svc
+            - name: MIMIR_POSTGRES_ADMIN_PORT
+              value: "5432"
+            # Percona publishes superuser credentials here, keyed user/password.
+            - name: MIMIR_POSTGRES_ADMIN_SECRET
+              value: mimir/mimir-postgres-pguser-postgres
+            - name: MIMIR_POSTGRES_ADMIN_DATABASE
+              value: postgres
+            # The cluster serves hostssl only; sslmode=disable is rejected
+            # outright rather than downgraded.
+            - name: MIMIR_POSTGRES_TLS
+              value: "true"
+          # Requests present from the start. An operator with a health probe
+          # and no request is the restart loop this platform keeps rediscovering.
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8081
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

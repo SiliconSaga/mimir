@@ -8,6 +8,10 @@ resources:
   - apps/percona-pg-operator.yaml
   - apps/percona-psmdb-operator.yaml
   - apps/percona-pxc-operator.yaml
+  # DataService operator, and the shared clusters it vends databases from.
+  # Two Applications on purpose — prune on the operator must not reach data.
+  - apps/dataservice-operator.yaml
+  - apps/shared-clusters.yaml
   # Operator RBAC (needs operator CRDs to exist)
   - ../percona/rbac.yaml
   # XRDs and Compositions (need operator CRDs + Crossplane)

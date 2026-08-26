@@ -1,0 +1,43 @@
+# ArgoCD Application for the platform's shared data clusters.
+#
+# These hold every tenant's data, which is why they are split out of the
+# operator Application and why prune is off. Under `prune: true`, deleting or
+# renaming a file here would delete a running database cluster — and after
+# consolidation that is not one app's data, it is all of them. Removing a
+# shared cluster should be a deliberate act, not a side effect of a refactor.
+#
+# selfHeal stays on: correcting drift on an existing cluster is safe, and it is
+# what stops a manual kubectl edit from surviving unnoticed.
+#
+# SkipDryRunOnMissingResource: PerconaPGCluster is validated against a CRD that
+# a sibling Application installs, so on a cold bootstrap it does not exist yet.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: mimir-shared-clusters
+  namespace: argo
+  # Deliberately NO resources-finalizer.argocd.argoproj.io.
+  #
+  # That finalizer cascades: deleting the Application deletes the resources it
+  # manages, which here means the running database cluster. Setting prune:false
+  # to protect the data and then leaving the cascade in place protects against
+  # a deleted *file* while leaving a deleted *Application* fatal — the smaller
+  # of the two accidents. Without it, removing the Application orphans the
+  # cluster, which is recoverable.
+spec:
+  project: default
+  source:
+    repoURL: 'http://gitea-http.gitea.svc.cluster.local:3000/nordri-admin/mimir.git'
+    targetRevision: HEAD
+    path: shared
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: mimir
+  syncPolicy:
+    automated:
+      prune: false
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      - SkipDryRunOnMissingResource=true

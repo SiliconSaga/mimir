@@ -1,0 +1,8 @@
+# Everything the build does not need. config/ and the docs change far more
+# often than the binary does; shipping them into the context would bust the
+# layer cache for nothing.
+config/
+*.md
+VERSION
+Dockerfile
+.dockerignore
