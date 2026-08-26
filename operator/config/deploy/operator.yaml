@@ -78,6 +78,19 @@ spec:
       containers:
         - name: manager
           image: ghcr.io/siliconsaga/mimir-dataservice:0.1.0
+          # Always, because the VERSION tag is deliberately MUTABLE pre-1.0 —
+          # CI republishes 0.1.0 on every change to operator/. The default for
+          # a non-`latest` tag is IfNotPresent, which trusts whatever already
+          # carries that name on the node.
+          #
+          # That is not theoretical. On the homelab this ran a seven-day-old
+          # image from a local `docker build` that happened to use the same
+          # tag: k3s under Rancher Desktop shares the workstation's image
+          # store, so the local copy shadowed the registry entirely. The
+          # symptom was an old binary against new RBAC — the operator kept
+          # trying to watch Secrets cluster-wide, a permission removed days
+          # earlier, and crash-looped on a cache it could never fill.
+          imagePullPolicy: Always
           args:
             - --leader-elect
           env:
