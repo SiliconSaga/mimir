@@ -83,7 +83,7 @@ spec:
           # same name. A swapped tag changes what the cluster runs while every
           # manifest still reads identically, so "is the fix deployed?" stops
           # being answerable from git at all.
-          image: ghcr.io/siliconsaga/mimir-dataservice:0.2.1
+          image: ghcr.io/siliconsaga/mimir-dataservice:0.3.0
           # Always, because the VERSION tag stays MUTABLE pre-1.0 — CI
           # republishes it for changes that do not earn a bump. The default for
           # a non-`latest` tag is IfNotPresent, which trusts whatever already
@@ -130,6 +130,29 @@ spec:
             # value is Percona-specific and worth being able to see.
             - name: MIMIR_POSTGRES_POOLER_AUTH_ROLE
               value: _crunchypgbouncer
+
+            - name: MIMIR_MYSQL_HOST
+              value: mimir-mysql-haproxy.mimir.svc
+            - name: MIMIR_MYSQL_PORT
+              value: "3306"
+            # No ADMIN_HOST override: unlike Postgres, MySQL DDL is not
+            # transactional, so HAProxy in front of the primary carries
+            # CREATE DATABASE perfectly well and admin traffic can share the
+            # consumer endpoint.
+            #
+            # The XtraDB operator's Secret is keyed BY USERNAME — root,
+            # monitor, xtrabackup — with passwords as the values, so there is
+            # no `user` key to read. The admin account is therefore given
+            # literally, and the password key defaults to "root" to match.
+            - name: MIMIR_MYSQL_ADMIN_SECRET
+              value: mimir/mimir-mysql-secrets
+            - name: MIMIR_MYSQL_ADMIN_USER
+              value: root
+            - name: MIMIR_MYSQL_ADMIN_DATABASE
+              value: mysql
+            # PXC serves TLS by default.
+            - name: MIMIR_MYSQL_TLS
+              value: "true"
           # Requests present from the start. An operator with a health probe
           # and no request is the restart loop this platform keeps rediscovering.
           resources:

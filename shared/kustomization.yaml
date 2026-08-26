@@ -7,3 +7,4 @@ kind: Kustomization
 
 resources:
   - postgres-cluster.yaml
+  - mysql-cluster.yaml

@@ -45,21 +45,25 @@ Nothing upstream closes the gap. Percona ships no per-database resource for any 
 
 A shared cluster runs one major version for every tenant, so honouring a per-request version there is impossible. Failing the request is honest; silently ignoring it is the dead-config failure mode that looks correct for months. An app that genuinely needs a different major version is telling you it needs `dedicated`, and the API says so.
 
-The platform documents what it serves: **PostgreSQL 15** today.
+The platform documents what it serves: **PostgreSQL 15** and **MySQL 8.0** (Percona XtraDB Cluster) today.
 
 ## Engines
 
 `postgres`, `mysql`, `mongodb` — the three that share a model of *a named database with an owning identity and a credential*.
 
-Only `postgres` has a provisioner in this build. The others are valid enum values that report cleanly rather than crashing, so adding one is implementing `engine.Provisioner` and registering it. The `DataService` API does not change.
+`postgres` and `mysql` have provisioners in this build. `mongodb` remains a valid enum value that reports cleanly rather than crashing, so adding it is implementing `engine.Provisioner` and registering it. The `DataService` API does not change.
 
 **Kafka and Valkey are deliberately excluded.** Kafka vends topics — plural — plus a separate identity carrying ACLs over four resource types and bandwidth quotas; Strimzi's `KafkaTopic`/`KafkaUser` already model that properly. The Valkey operator models no per-tenant object at all, so there is nothing to hand out short of an instance. Forcing either through `databaseName` would lose expressiveness for nothing.
 
 ## Tenant isolation
 
-PostgreSQL lets **any role connect to any database by default**. Without intervention, a shared cluster is shared *data*.
+The hazard is real in both engines, but it is **not the same hazard**, and porting one engine's fix to the other would miss it entirely.
 
-Every reconcile therefore runs `REVOKE CONNECT ON DATABASE … FROM PUBLIC` alongside the grant to the owning role. `tests/e2e/dataservice-isolation` asserts it end to end, and insists on the *right* failure — a wrong hostname also fails, and would otherwise look like a pass.
+**PostgreSQL** lets any role connect to any database by default. Without intervention, a shared cluster is shared *data*. Every reconcile therefore runs `REVOKE CONNECT ON DATABASE … FROM PUBLIC` alongside the grant to the owning role. `tests/e2e/dataservice-isolation` asserts it end to end, and insists on the *right* failure — a wrong hostname also fails, and would otherwise look like a pass.
+
+**MySQL** has the opposite default: no `PUBLIC`, and a user with no grant reaches nothing. There is nothing to revoke. Its hazard is in the `GRANT` itself — **the database part is a `LIKE` pattern, not an identifier**. So `GRANT ALL ON app_one.*` also grants on `appXone`, including databases that do not exist yet and may later belong to someone else. Nothing errors and nothing logs; the extra privilege simply appears when a matching database is created.
+
+Underscores are not an edge case here — `DerivePhysicalName` joins namespace and name with one, so nearly every derived name is exposed. The provisioner escapes `_`, `%` and `\` in the grant's database part, and `TestMySQLGrantWildcardDoesNotLeak` proves it with a **negative control**: it first grants the *unescaped* form and asserts the leak really happens on this server, so the escaped assertion cannot pass vacuously.
 
 ## Naming and ownership
 
@@ -125,6 +129,20 @@ The bootstrap checks whether `POOLER_AUTH_ROLE` exists and does nothing when it 
 
 The failure mode this fixes was silent: pgBouncer reports the failed lookup to the client as `permission denied for database "x"`, which is exactly what a correctly refused cross-tenant attempt looks like.
 
+The pattern is `MIMIR_<ENGINE>_*`, so MySQL takes the same variables with different defaults — but **its admin credential is shaped differently**, and that is worth reading before wiring it:
+
+| Variable | Default | Notes |
+|---|---|---|
+| `MIMIR_MYSQL_HOST` | required | HAProxy; admin traffic can share it |
+| `MIMIR_MYSQL_PORT` | `3306` | |
+| `MIMIR_MYSQL_ADMIN_SECRET` | required | `namespace/name` |
+| `MIMIR_MYSQL_ADMIN_USER` | — | **give it literally**, e.g. `root` |
+| `MIMIR_MYSQL_ADMIN_PASSWORD_KEY` | `root` | the PXC convention |
+| `MIMIR_MYSQL_ADMIN_DATABASE` | `mysql` | |
+| `MIMIR_MYSQL_TLS` | `true` | PXC serves TLS by default |
+
+**Why `ADMIN_USER` exists at all.** Percona's Postgres operator publishes `<cluster>-pguser-<user>` carrying `user` and `password`, so a key lookup finds both. Percona's XtraDB operator publishes `<cluster>-secrets` whose **keys are the usernames** — `root`, `monitor`, `xtrabackup` — with the passwords as values. No key holds the string `root`, so no value of `ADMIN_USER_KEY` can resolve it. `ADMIN_USER` takes the name literally and wins over the key; the password still comes from the Secret, which is the part that must never be config.
+
 **Admin and consumer endpoints must differ when a pooler is in front.** `CREATE DATABASE` cannot run inside a transaction block, and a pooler in transaction mode wraps every statement in one — so admin traffic goes to the primary while consumers get the pooler. Pointing both at the pooler produces a confusing failure deep inside a reconcile.
 
 An engine with no `HOST` set is simply not configured, and `shared` requests for it report `ClusterNotFound` rather than crashing the operator.
@@ -173,6 +191,8 @@ The runtime image is `distroless/static:nonroot` — no shell, no package manage
 ## Known gaps
 
 - `placement: dedicated` is not implemented here.
-- MySQL and MongoDB have no provisioner.
-- The shared cluster's pgBackRest repo is a **local PVC with no offsite copy**. Consolidating concentrates that risk: what used to cost one app its database now costs all of them. Mimir Phase 2 is the fix, and it stops being optional once Forgejo is load-bearing for GitOps.
-- The admin connection uses `sslmode=require`, not `verify-full` — encrypted, but the server identity is unverified because the operator does not carry the cluster's internal CA.
+- MongoDB has no provisioner.
+- **The shared MySQL cluster is a single PXC node.** Galera is quorum-based, so one node is not replicating anything and `allowUnsafeConfigurations` is what permits it — a single point of failure for every tenant on it. Raising `pxc.size` to 3 belongs with the offsite-backup work below; both are prerequisites before anything load-bearing depends on it.
+- Neither shared cluster's backups leave the cluster: pgBackRest's repo and PXC's `local` storage are both **PVCs with no offsite copy**. Consolidating concentrates that risk — what used to cost one app its database now costs all of them. Mimir Phase 2 is the fix, and it stops being optional once Forgejo is load-bearing for GitOps.
+- Admin connections are encrypted but **do not verify server identity** — `sslmode=require` for Postgres, `tls=skip-verify` for MySQL — because the operator does not carry the clusters' internal CA.
+- **MySQL user names cap at 32 characters** while database names get 63, so a long database gets a truncated-plus-hashed account name and `Credentials.Username` stops matching the database name. Consumers read it from the Secret, so this is invisible to them, but it surprises anyone reading the server by hand.

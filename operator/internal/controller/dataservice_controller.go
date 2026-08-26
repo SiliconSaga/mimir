@@ -53,6 +53,17 @@ type SharedCluster struct {
 	AdminSecretNamespace string
 	AdminUserKey         string
 	AdminPasswordKey     string
+	// AdminUser is the admin account name given literally, used INSTEAD of
+	// reading AdminUserKey from the Secret.
+	//
+	// Needed because operators disagree about Secret shape. Percona's Postgres
+	// operator publishes <cluster>-pguser-<user> containing both `user` and
+	// `password`, so a key lookup works. Percona's XtraDB operator publishes
+	// <cluster>-secrets whose KEYS ARE THE USERNAMES and whose values are the
+	// passwords — `root`, `monitor`, `xtrabackup`. There is no key holding the
+	// string "root", so no value of AdminUserKey can resolve it, and a
+	// key-only design simply cannot be pointed at a PXC cluster.
+	AdminUser string
 	// AdminDatabase to connect to for administering others.
 	AdminDatabase string
 	// TLS is whether the server requires an encrypted connection.
@@ -333,10 +344,19 @@ func (r *DataServiceReconciler) resolveTarget(ctx context.Context, s SharedClust
 		return engine.Target{}, fmt.Errorf("read admin secret %s: %w", key, err)
 	}
 
-	user, ok := secret.Data[s.AdminUserKey]
-	if !ok {
-		return engine.Target{}, fmt.Errorf("admin secret %s has no key %q", key, s.AdminUserKey)
+	// A literal admin user wins over a key lookup. The password still comes
+	// from the Secret either way — that is the part that must not be config.
+	adminUser := s.AdminUser
+	if adminUser == "" {
+		user, ok := secret.Data[s.AdminUserKey]
+		if !ok {
+			return engine.Target{}, fmt.Errorf("admin secret %s has no key %q "+
+				"(set the engine's ADMIN_USER if the operator publishes passwords under username keys)",
+				key, s.AdminUserKey)
+		}
+		adminUser = string(user)
 	}
+
 	pass, ok := secret.Data[s.AdminPasswordKey]
 	if !ok {
 		return engine.Target{}, fmt.Errorf("admin secret %s has no key %q", key, s.AdminPasswordKey)
@@ -347,7 +367,7 @@ func (r *DataServiceReconciler) resolveTarget(ctx context.Context, s SharedClust
 		Port:           s.Port,
 		AdminHost:      s.AdminHost,
 		AdminPort:      s.AdminPort,
-		AdminUser:      string(user),
+		AdminUser:      adminUser,
 		AdminPassword:  string(pass),
 		AdminDatabase:  s.AdminDatabase,
 		TLS:            s.TLS,
