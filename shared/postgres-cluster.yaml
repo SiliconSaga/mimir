@@ -23,6 +23,16 @@ spec:
 
   instances:
     - name: instance1
+      # SINGLE INSTANCE, and that is a stated limitation rather than an
+      # oversight: this cluster is a single point of failure for every tenant
+      # on it, which is strictly worse than the per-app clusters it replaces,
+      # where one failure cost one app.
+      #
+      # Deliberate for now. This platform is actively being de-contended and a
+      # standby would roughly double the reservation, so the trade is taken
+      # knowingly and written down. Raising this to 2 with a PodDisruptionBudget
+      # is the fix, and it belongs with the offsite-backup work below — both are
+      # prerequisites before anything load-bearing depends on this cluster.
       replicas: 1
       # Sized for the sum of its tenants plus connection overhead, not for one
       # of the clusters it replaces. Measured p95 of the three existing
@@ -54,7 +64,17 @@ spec:
   backups:
     enabled: true
     pgbackrest:
-      image: "percona/percona-postgresql-operator:2.7.0-ppg15-postgres"
+      # pgBackRest ships in its OWN repository, not as a suffixed tag on the
+      # operator repo. This previously pointed at the PostgreSQL *server*
+      # image, which the repo-host would have run instead of pgBackRest —
+      # accepted by the API, then failing at backup time, which is the least
+      # visible failure this cluster can have.
+      #
+      # Verified against Docker Hub: percona/percona-postgresql-operator has no
+      # pgbackrest tag at 2.7.0 at all (only 2.6.0-ppg17 ones), while
+      # percona/percona-pgbackrest:2.55.0 was published in the same week as the
+      # 2.7.0 server images.
+      image: "percona/percona-pgbackrest:2.55.0"
       # Requests here for the same reason as everywhere else on this cluster:
       # BestEffort plus a health probe is a restart loop under contention, and
       # this is the pod holding the backups.
@@ -125,7 +145,14 @@ spec:
   proxy:
     pgBouncer:
       replicas: 1
-      image: "percona/percona-postgresql-operator:2.6.0-ppg15-pgbouncer"
+      # Not flagged in review, found while verifying the pgBackRest image
+      # above: this was an operator-2.6.0 artifact under a 2.7.0 operator. The
+      # tag exists and would pull, so the skew was invisible.
+      #
+      # Same pgBouncer version as before (1.24.0, per the 2.6.0-ppg15.12-
+      # pgbouncer1.24.0 tag it came from), moved to the standalone repository
+      # where Percona publishes it from 2.7.0 onward.
+      image: "percona/percona-pgbouncer:1.24.0"
       resources:
         requests:
           cpu: 50m

@@ -48,6 +48,16 @@ const (
 // would provision a second database and orphan the original; changing placement
 // would make cleanup skip the shared database entirely. Rejecting the edit is
 // the honest answer: delete the DataService and declare a new one.
+//
+// The presence rule below is separate from the per-field ones and is NOT
+// redundant. Kubernetes skips a field-level transition rule whenever the field
+// is absent from either the old or the new object, so `self == oldSelf` on an
+// optional field does not stop it being ADDED after creation. Without this,
+// setting databaseName on an object that had none would provision a second
+// database under the new name while the originally derived one — still the
+// value in status.provisionedDatabase — is orphaned for good.
+//
+// +kubebuilder:validation:XValidation:rule="has(self.databaseName) == has(oldSelf.databaseName)",message="databaseName cannot be added or removed after creation — delete and recreate the DataService instead"
 type DataServiceSpec struct {
 	// Engine is which kind of data service to provision.
 	//

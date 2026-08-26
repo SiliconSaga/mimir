@@ -188,15 +188,28 @@ func (r *DataServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{RequeueAfter: requeueAfterTransient}, nil
 	}
 
+	// Persist the physical name IMMEDIATELY, before anything else can fail.
+	//
+	// The database and role now exist. dropShared refuses to guess a name and
+	// returns early when status.provisionedDatabase is empty, so if this were
+	// recorded only in the final patch below, a failure in writeSecret — or in
+	// that patch itself — would leave a provisioned database with no record of
+	// it. Deleting the object then releases the finalizer and orphans both,
+	// and the leftover name blocks the next request for it with an ownership
+	// conflict. Exactly the orphaning the deletion path exists to prevent.
+	if ds.Status.ProvisionedDatabase != dbName {
+		ds.Status.ProvisionedDatabase = dbName
+		if err := r.patchStatus(ctx, &ds); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
 	if err := r.writeSecret(ctx, &ds, secretName, creds); err != nil {
 		return ctrl.Result{}, err
 	}
 
 	ds.Status.Phase = "Ready"
 	ds.Status.SecretName = secretName
-	// Record what was actually provisioned, so deletion cleans up that rather
-	// than re-deriving from a spec that may have been edited.
-	ds.Status.ProvisionedDatabase = dbName
 	ds.Status.Host = creds.Host
 	ds.Status.Port = creds.Port
 	r.setReady(&ds, metav1.ConditionTrue, mimirv1alpha1.ReasonProvisioned,
