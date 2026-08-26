@@ -218,9 +218,18 @@ func (Postgres) databaseOwnerMarker(ctx context.Context, conn *pgx.Conn, databas
 // roleOwnerMarker returns the owner recorded on a role, or "" when there is no
 // marker — meaning the role was created outside the operator.
 func (Postgres) roleOwnerMarker(ctx context.Context, conn *pgx.Conn, role string) (string, error) {
+	// FROM pg_roles, not pg_authid. pg_authid holds password hashes and is
+	// readable by superusers only, so an admin role with CREATEROLE but not
+	// SUPERUSER — a perfectly reasonable way to run this operator — gets a
+	// permission error instead of a marker. Worse in Drop, which would have
+	// removed the database and then failed reading the role, orphaning it.
+	//
+	// pg_roles is the public view over the same rows. The catalog argument to
+	// shobj_description stays 'pg_authid', because that is where the comment is
+	// recorded regardless of which view is queried.
 	var comment *string
 	if err := conn.QueryRow(ctx,
-		`SELECT shobj_description(oid, 'pg_authid') FROM pg_authid WHERE rolname = $1`,
+		`SELECT shobj_description(oid, 'pg_authid') FROM pg_roles WHERE rolname = $1`,
 		role,
 	).Scan(&comment); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
