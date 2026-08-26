@@ -5,8 +5,10 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
+	"net"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -270,9 +272,9 @@ func (Postgres) connect(ctx context.Context, t Target, database string) (*pgx.Co
 		// encrypted; the identity check is a hardening follow-up.
 		sslmode = "require"
 	}
-	dsn := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
+	dsn := fmt.Sprintf("postgres://%s:%s@%s/%s?sslmode=%s",
 		url.QueryEscape(t.AdminUser), url.QueryEscape(t.AdminPassword),
-		t.AdminHost, t.AdminPort, url.PathEscape(database), sslmode)
+		hostPort(t.AdminHost, t.AdminPort), url.PathEscape(database), sslmode)
 
 	conn, err := pgx.Connect(ctx, dsn)
 	if err != nil {
@@ -288,9 +290,20 @@ func postgresURI(t Target, database, user, password string) string {
 	if t.TLS {
 		sslmode = "require"
 	}
-	return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
+	return fmt.Sprintf("postgres://%s:%s@%s/%s?sslmode=%s",
 		url.QueryEscape(user), url.QueryEscape(password),
-		t.Host, t.Port, url.PathEscape(database), sslmode)
+		hostPort(t.Host, t.Port), url.PathEscape(database), sslmode)
+}
+
+// hostPort joins a host and port for a URL authority.
+//
+// net.JoinHostPort rather than "%s:%d" so an IPv6 literal gets its brackets —
+// without them the address's own colons are read as the port separator and the
+// URL fails to parse. Service DNS names are the normal case, but the published
+// URI goes into a Secret that consumers paste into their own config, so it has
+// to be correct for whatever host the platform is configured with.
+func hostPort(host string, port int32) string {
+	return net.JoinHostPort(host, strconv.Itoa(int(port)))
 }
 
 // ValidateIdentifier rejects anything that is not a plain lower-case SQL

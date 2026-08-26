@@ -202,6 +202,12 @@ func (d *DataService) Owner() string {
 // Truncation keeps a hash of the FULL input, so two long namespaces sharing a
 // prefix stay distinct — plain truncation would reintroduce exactly the
 // collision this function exists to prevent.
+//
+// Length reduction happens HERE and nowhere else. An earlier version also
+// truncated inside sanitizeIdentifier after prefixing a leading digit, which
+// produced a string of exactly maxIdentifier — so the `>` test below was false,
+// no hash was appended, and two digit-leading namespaces differing only past
+// character 61 collided. Two places that shorten a string is one too many.
 func DerivePhysicalName(namespace, name string) string {
 	full := namespace + "_" + name
 	sanitized := sanitizeIdentifier(full)
@@ -214,6 +220,15 @@ func DerivePhysicalName(namespace, name string) string {
 	return sanitized
 }
 
+// sanitizeIdentifier maps a Kubernetes name onto the SQL identifier alphabet.
+// It never shortens: length is DerivePhysicalName's job alone.
+//
+// Note this is lossy, and deliberately so. Kubernetes namespaces are DNS-1123
+// labels (lower-case, digits, '-'), and object names may also carry '.', all of
+// which fold to '_'. So "app.v2" and "app-v2" in one namespace derive the same
+// physical name. That is a real collision, but a SAFE one: the ownership marker
+// refuses the second request with a Conflict rather than letting it adopt the
+// first tenant's database. Visible and stuck beats silent and shared.
 func sanitizeIdentifier(s string) string {
 	s = strings.ToLower(s)
 	var b strings.Builder
@@ -222,8 +237,6 @@ func sanitizeIdentifier(s string) string {
 		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '_':
 			b.WriteRune(r)
 		default:
-			// '-' and '.' are the realistic cases; anything else a Kubernetes
-			// name could carry collapses the same way.
 			b.WriteRune('_')
 		}
 	}
@@ -234,9 +247,6 @@ func sanitizeIdentifier(s string) string {
 	// An identifier may not begin with a digit unquoted.
 	if out[0] >= '0' && out[0] <= '9' {
 		out = "d_" + out
-		if len(out) > maxIdentifier {
-			out = out[:maxIdentifier]
-		}
 	}
 	return out
 }

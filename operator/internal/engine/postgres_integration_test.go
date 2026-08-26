@@ -77,11 +77,35 @@ func testTarget(t *testing.T) Target {
 	}
 }
 
+// cleanup drops a database on a bounded context and reports failure.
+//
+// t.Cleanup with context.Background() and a discarded error can hang against an
+// unreachable server, and a silent failure leaves databases and roles behind
+// while the test still reports success — which then breaks the NEXT run for a
+// reason that has nothing to do with the code.
+func cleanup(t *testing.T, tgt Target, database string) {
+	t.Helper()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := (Postgres{}).Drop(ctx, tgt, database); err != nil {
+			t.Errorf("cleanup: dropping %q left state behind: %v", database, err)
+		}
+	})
+}
+
+// adminURI is the superuser connection string for direct catalog checks.
+func adminURI(tgt Target) string {
+	return fmt.Sprintf("postgres://%s:%s@%s/%s?sslmode=disable",
+		tgt.AdminUser, tgt.AdminPassword,
+		net.JoinHostPort(tgt.AdminHost, strconv.Itoa(int(tgt.AdminPort))), tgt.AdminDatabase)
+}
+
 // connectAs opens a connection with an arbitrary credential, which is how a
 // tenant's own connection is simulated.
 func connectAs(ctx context.Context, tgt Target, user, password, database string) error {
-	uri := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
-		user, password, tgt.AdminHost, tgt.AdminPort, database)
+	uri := fmt.Sprintf("postgres://%s:%s@%s/%s?sslmode=disable",
+		user, password, net.JoinHostPort(tgt.AdminHost, strconv.Itoa(int(tgt.AdminPort))), database)
 	conn, err := pgx.Connect(ctx, uri)
 	if err != nil {
 		return err
@@ -111,13 +135,13 @@ func TestTenantIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("provisioning tenant_alpha: %v", err)
 	}
-	t.Cleanup(func() { _ = p.Drop(context.Background(), tgt, alphaDB) })
+	cleanup(t, tgt, alphaDB)
 
 	beta, err := p.Ensure(ctx, tgt, betaDB, "", Options{})
 	if err != nil {
 		t.Fatalf("provisioning tenant_beta: %v", err)
 	}
-	t.Cleanup(func() { _ = p.Drop(context.Background(), tgt, betaDB) })
+	cleanup(t, tgt, betaDB)
 
 	// Each tenant reaches its own database.
 	if err := connectAs(ctx, tgt, alpha.Username, alpha.Password, alphaDB); err != nil {
@@ -166,7 +190,7 @@ func TestRefusesToAdoptAnotherOwnersDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("provisioning for team-a: %v", err)
 	}
-	t.Cleanup(func() { _ = p.Drop(context.Background(), tgt, db) })
+	cleanup(t, tgt, db)
 
 	_, err = p.Ensure(ctx, tgt, db, "", Options{Owner: "team-b/app"})
 	if err == nil {
@@ -193,8 +217,7 @@ func TestRefusesUnmarkedPreExistingDatabase(t *testing.T) {
 
 	preDB := testDB(t, "tenant_preexisting")
 
-	admin := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
-		tgt.AdminUser, tgt.AdminPassword, tgt.AdminHost, tgt.AdminPort, tgt.AdminDatabase)
+	admin := adminURI(tgt)
 	conn, err := pgx.Connect(ctx, admin)
 	if err != nil {
 		t.Fatalf("admin connect: %v", err)
@@ -205,12 +228,17 @@ func TestRefusesUnmarkedPreExistingDatabase(t *testing.T) {
 		t.Fatalf("seeding a hand-made database: %v", err)
 	}
 	t.Cleanup(func() {
-		c, err := pgx.Connect(context.Background(), admin)
+		cctx, ccancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer ccancel()
+		c, err := pgx.Connect(cctx, admin)
 		if err != nil {
+			t.Errorf("cleanup: cannot reach the server to drop %q: %v", preDB, err)
 			return
 		}
-		defer c.Close(context.Background())
-		_, _ = c.Exec(context.Background(), "DROP DATABASE IF EXISTS "+quoteIdentifier(preDB))
+		defer c.Close(cctx)
+		if _, err := c.Exec(cctx, "DROP DATABASE IF EXISTS "+quoteIdentifier(preDB)); err != nil {
+			t.Errorf("cleanup: dropping %q left state behind: %v", preDB, err)
+		}
 	})
 
 	_, err = Postgres{}.Ensure(ctx, tgt, preDB, "", Options{Owner: "team-a/app"})
@@ -238,7 +266,7 @@ func TestEnsureIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Ensure: %v", err)
 	}
-	t.Cleanup(func() { _ = p.Drop(context.Background(), tgt, idemDB) })
+	cleanup(t, tgt, idemDB)
 
 	second, err := p.Ensure(ctx, tgt, idemDB, first.Password, Options{})
 	if err != nil {
@@ -277,8 +305,7 @@ func TestDropRemovesEverything(t *testing.T) {
 		t.Fatalf("Drop: %v", err)
 	}
 
-	admin := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
-		tgt.AdminUser, tgt.AdminPassword, tgt.AdminHost, tgt.AdminPort, tgt.AdminDatabase)
+	admin := adminURI(tgt)
 	conn, err := pgx.Connect(ctx, admin)
 	if err != nil {
 		t.Fatalf("admin connect: %v", err)
@@ -307,5 +334,5 @@ func TestDropRemovesEverything(t *testing.T) {
 	if _, err := p.Ensure(ctx, tgt, dropDB, "", Options{}); err != nil {
 		t.Fatalf("re-provisioning after Drop: %v", err)
 	}
-	t.Cleanup(func() { _ = p.Drop(context.Background(), tgt, dropDB) })
+	cleanup(t, tgt, dropDB)
 }

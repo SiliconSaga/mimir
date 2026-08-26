@@ -232,21 +232,17 @@ func (r *DataServiceReconciler) reconcileDelete(ctx context.Context, ds *mimirv1
 		return ctrl.Result{}, nil
 	}
 
-	prov, ok := r.Registry.For(ds.Spec.Engine)
-	shared, hasCluster := r.SharedClusters[ds.Spec.Engine]
-
 	// The escape hatch is explicit and human-set. Releasing automatically on
 	// failure — as an earlier version did — silently orphans a tenant's data on
 	// the shared cluster, where it then blocks the next request for that name
 	// with a conflict nobody can explain.
 	force := ds.Annotations[forceDeleteAnnotation] == "true"
 
-	if ok && hasCluster && ds.ResolvedPlacement() == mimirv1alpha1.PlacementShared {
-		target, err := r.resolveTarget(ctx, shared)
-		if err == nil {
-			err = prov.Drop(ctx, target, ds.ResolvedDatabaseName())
-		}
-		if err != nil {
+	// Only shared placement has a database here to drop. `dedicated` still runs
+	// through the old PostgreSQLInstance claim, which owns its own lifecycle,
+	// so there is genuinely nothing for this controller to clean up.
+	if ds.ResolvedPlacement() == mimirv1alpha1.PlacementShared {
+		if err := r.dropShared(ctx, ds); err != nil {
 			if !force {
 				l.Error(err, "cannot drop database; keeping finalizer so the data is not orphaned",
 					"database", ds.ResolvedDatabaseName(),
@@ -260,6 +256,33 @@ func (r *DataServiceReconciler) reconcileDelete(ctx context.Context, ds *mimirv1
 
 	controllerutil.RemoveFinalizer(ds, finalizer)
 	return ctrl.Result{}, r.Update(ctx, ds)
+}
+
+// dropShared removes the database backing a shared-placement DataService.
+//
+// A missing provisioner or missing shared cluster is treated as a FAILURE to
+// clean up, not as "nothing to do". Both are read from process configuration —
+// the registry from the build, the cluster map from environment — so a
+// redeploy with MIMIR_POSTGRES_HOST unset makes the map empty. Skipping the
+// drop in that window would release the finalizer and leave the database and
+// role behind on the shared cluster, which is precisely the orphaning the
+// caller's comment says it prevents, and the leftover name then blocks the
+// next request for it with an ownership conflict.
+func (r *DataServiceReconciler) dropShared(ctx context.Context, ds *mimirv1alpha1.DataService) error {
+	prov, ok := r.Registry.For(ds.Spec.Engine)
+	if !ok {
+		return fmt.Errorf("no provisioner for engine %q in this build, so the database cannot be dropped", ds.Spec.Engine)
+	}
+	shared, hasCluster := r.SharedClusters[ds.Spec.Engine]
+	if !hasCluster {
+		return fmt.Errorf("no shared cluster configured for engine %q, so the database cannot be dropped", ds.Spec.Engine)
+	}
+
+	target, err := r.resolveTarget(ctx, shared)
+	if err != nil {
+		return err
+	}
+	return prov.Drop(ctx, target, ds.ResolvedDatabaseName())
 }
 
 // resolveTarget reads the admin credentials for a shared cluster.

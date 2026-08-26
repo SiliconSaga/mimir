@@ -115,9 +115,25 @@ func TestDerivedNamesDoNotCollideAcrossNamespaces(t *testing.T) {
 	if c == d {
 		t.Fatalf("truncation collapsed two distinct namespaces into %q", c)
 	}
-	for _, got := range []string{a, b, c, d} {
+
+	// The same case but starting with a DIGIT, which takes the branch that
+	// prefixes "d_". That prefix used to be followed by its own truncation, so
+	// the result landed at exactly the length limit, the "too long" test in
+	// DerivePhysicalName was false, and no hash was appended — collapsing these
+	// two. The original test used an all-letter prefix and never came here.
+	digitLong := "9" + strings.Repeat("n", 59)
+	e := mimirv1alpha1.DerivePhysicalName(digitLong+"-one", "app")
+	f := mimirv1alpha1.DerivePhysicalName(digitLong+"-two", "app")
+	if e == f {
+		t.Fatalf("digit-leading truncation collapsed two distinct namespaces into %q", e)
+	}
+
+	for _, got := range []string{a, b, c, d, e, f} {
 		if err := engine.ValidateIdentifier(got); err != nil {
 			t.Errorf("derived name %q is not a usable identifier: %v", got, err)
+		}
+		if len(got) > 63 {
+			t.Errorf("derived name %q exceeds the identifier length limit at %d", got, len(got))
 		}
 	}
 }

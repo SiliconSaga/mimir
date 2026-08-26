@@ -94,17 +94,36 @@ jobs:
             output:rbac:artifacts:config=config/rbac
           git diff --exit-code -- api config
 
-  build:
+  # Two jobs rather than one with a conditional permission.
+  #
+  # `permissions` accepts no expressions — a context there fails workflow
+  # validation outright, in zero seconds, with no jobs and no error attached to
+  # anything. So the split is the only way to give the pull-request path a
+  # token that genuinely cannot publish, rather than one it merely does not use.
+  build-pr:
     needs: test
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    # Pull requests build but do not publish, so a broken Dockerfile fails in
-    # review rather than on merge, without putting an unreviewed image behind
-    # a tag the cluster might pull.
-    #
-    # `permissions` takes no expressions — a context here fails workflow
-    # validation outright, with no jobs and no useful error. The grant is
-    # therefore static and the *use* is conditional: on a pull request this job
-    # never logs in and never pushes, so the token is simply unused.
+    permissions:
+      contents: read
+      packages: none
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@v3
+      # No login and no tags: this proves the Dockerfile still builds, nothing
+      # more. A broken build fails in review instead of on merge.
+      - uses: docker/build-push-action@v6
+        with:
+          context: operator
+          push: false
+          cache-from: type=gha
+
+  publish:
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
@@ -121,9 +140,7 @@ jobs:
       # type=gha; the default docker driver has no cache exporter.
       - uses: docker/setup-buildx-action@v3
 
-      # Registry credentials only where something is actually pushed.
       - uses: docker/login-action@v3
-        if: github.event_name != 'pull_request'
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -144,7 +161,7 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: operator
-          push: ${{ github.event_name != 'pull_request' }}
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
