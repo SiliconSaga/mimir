@@ -95,11 +95,16 @@ esac
 echo "target: context=$CTX server=$SERVER"
 echo "nodes:  $(kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{" "}{end}')"
 
-kubectl config view --minify --flatten >"$WORK/kubeconfig"
-sed -i -e 's/127\.0\.0\.1/host.docker.internal/g' \
-       -e 's/localhost/host.docker.internal/g' \
-       -e 's/certificate-authority-data:.*/insecure-skip-tls-verify: true/' \
-       "$WORK/kubeconfig"
+# Written to a second file rather than edited in place. `sed -i` is not
+# portable: BSD sed on macOS reads the argument after -i as a backup SUFFIX, so
+# `sed -i -e ...` takes "-e" as the suffix and the edit script as a filename.
+# Since both files are already in a temp directory, redirecting sidesteps the
+# incompatibility instead of working around it.
+kubectl config view --minify --flatten >"$WORK/raw-kubeconfig"
+sed -e 's/127\.0\.0\.1/host.docker.internal/g' \
+    -e 's/localhost/host.docker.internal/g' \
+    -e 's/certificate-authority-data:.*/insecure-skip-tls-verify: true/' \
+    "$WORK/raw-kubeconfig" >"$WORK/kubeconfig"
 
 # Git Bash rewrites anything that looks like a POSIX path in a Windows process's
 # argv, which mangles the container-side halves of these -v pairs. cygpath
@@ -109,6 +114,12 @@ hostpath() { cygpath -w "$1" 2>/dev/null || printf '%s' "$1"; }
 
 # kuttl resolves testDirs relative to CWD, and a symlinked tree keeps the
 # container from writing into the mounted repo.
+#
+# The -c script is SINGLE-quoted and the kuttl arguments are passed after it as
+# positional parameters, so `$@` is expanded by the container's shell against a
+# real argument vector. Interpolating them into the string instead would flatten
+# quoting — an argument containing a space would split, and one containing shell
+# metacharacters would be evaluated rather than passed.
 MSYS_NO_PATHCONV=1 docker run --rm \
   -v "$(hostpath "$WORK/kubeconfig")":/kubeconfig \
   -v "$(hostpath "$REPO")":/workspace \
@@ -116,4 +127,5 @@ MSYS_NO_PATHCONV=1 docker run --rm \
   --add-host host.docker.internal:host-gateway \
   --entrypoint /bin/sh \
   kudobuilder/kuttl:latest \
-  -c "mkdir -p /tmp/work && cp /workspace/kuttl-test.yaml /tmp/work/ && ln -s /workspace/tests /tmp/work/tests && ln -s /usr/bin/kubectl /tmp/work/kubectl && cd /tmp/work && kubectl-kuttl test --config kuttl-test.yaml ${args[*]+${args[*]}}"
+  -c 'mkdir -p /tmp/work && cp /workspace/kuttl-test.yaml /tmp/work/ && ln -s /workspace/tests /tmp/work/tests && ln -s /usr/bin/kubectl /tmp/work/kubectl && cd /tmp/work && exec kubectl-kuttl test --config kuttl-test.yaml "$@"' \
+  run-kuttl ${args[@]+"${args[@]}"}
