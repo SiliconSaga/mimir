@@ -668,8 +668,14 @@ func TestPoolerAuthBootstrap(t *testing.T) {
 		if err == nil {
 			t.Fatal("PRIVILEGE LEAK: a tenant can read password verifiers through pgbouncer.get_auth")
 		}
-		if !strings.Contains(strings.ToLower(err.Error()), "permission denied") {
-			t.Fatalf("tenant was refused, but not by the grant model — got %v", err)
+		// Name the object that refused. A bare "permission denied" would also
+		// be produced by a database the tenant cannot even reach, which is the
+		// state before the bootstrap exists — so the generic check would pass
+		// while proving nothing about the grants on this function.
+		msg := strings.ToLower(err.Error())
+		if !strings.Contains(msg, "permission denied for schema") &&
+			!strings.Contains(msg, "permission denied for function") {
+			t.Fatalf("tenant was refused, but not by the grants on the lookup — got %v", err)
 		}
 	})
 

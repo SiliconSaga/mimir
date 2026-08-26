@@ -194,10 +194,17 @@ commands:
         exit 1
       fi
 
+      # Name the object that did the refusing. A bare "permission denied" is
+      # not good enough here, and this is not hypothetical: run this against an
+      # operator with no pooler bootstrap at all and the connection is refused
+      # at the DATABASE — `permission denied for database` — which would let
+      # this assertion pass while the function it is about does not exist.
+      # Only the schema or the function refusing means the grants are right.
       case "$OUT" in
-        *"permission denied"*) ;;
+        *"permission denied for function"*) ;;
+        *"permission denied for schema"*) ;;
         *)
-          echo "the lookup was refused, but not by the grant model:" >&2
+          echo "the lookup was refused, but not by the grants on it:" >&2
           echo "$OUT" >&2
           exit 1
           ;;

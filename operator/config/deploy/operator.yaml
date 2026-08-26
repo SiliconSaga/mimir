@@ -77,9 +77,15 @@ spec:
           type: RuntimeDefault
       containers:
         - name: manager
-          image: ghcr.io/siliconsaga/mimir-dataservice:0.1.0
-          # Always, because the VERSION tag is deliberately MUTABLE pre-1.0 —
-          # CI republishes 0.1.0 on every change to operator/. The default for
+          # Kept in step with operator/VERSION, the tag CI publishes.
+          #
+          # Bump it for a behaviour change rather than republishing under the
+          # same name. A swapped tag changes what the cluster runs while every
+          # manifest still reads identically, so "is the fix deployed?" stops
+          # being answerable from git at all.
+          image: ghcr.io/siliconsaga/mimir-dataservice:0.2.0
+          # Always, because the VERSION tag stays MUTABLE pre-1.0 — CI
+          # republishes it for changes that do not earn a bump. The default for
           # a non-`latest` tag is IfNotPresent, which trusts whatever already
           # carries that name on the node.
           #
