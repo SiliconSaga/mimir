@@ -324,6 +324,12 @@ const (
 // privilege escalation out of their own database. The path is pinned and every
 // reference inside the body is schema-qualified as well.
 //
+// getAuthResultType is what pg_get_function_result reports for the signature
+// below, used to recognise a function of this name that is not ours. Asserted
+// in the integration tests rather than trusted, since it is a rendering of the
+// DDL by the server and not a string this package controls.
+const getAuthResultType = "TABLE(username text, password text)"
+
 // rolcanlogin filters out group roles, which have no password to hand back.
 const getAuthDDL = `CREATE OR REPLACE FUNCTION ` + poolerAuthSchema + `.` + poolerAuthFunction + `(p_username TEXT)
   RETURNS TABLE (username TEXT, password TEXT)
@@ -416,11 +422,38 @@ func (p Postgres) ensurePoolerAuth(ctx context.Context, conn *pgx.Conn, t Target
 		fmt.Sprintf("ALTER SCHEMA %s OWNER TO %s", qSchema, qAdmin),
 		fmt.Sprintf("REVOKE ALL ON SCHEMA %s FROM PUBLIC", qSchema),
 		fmt.Sprintf("GRANT USAGE ON SCHEMA %s TO %s", qSchema, qAuth),
+	} {
+		if _, err := dbConn.Exec(ctx, stmt); err != nil {
+			return fmt.Errorf("bootstrap pooler auth in %q: %w", database, err)
+		}
+	}
+
+	// Clear a function of this name that is not the one we are about to write.
+	//
+	// CREATE OR REPLACE cannot change a function's return type, and the tenant
+	// owns this database, so a get_auth(TEXT) they declared differently would
+	// make every later reconcile fail on the DDL below — permanently, with the
+	// DataService never reaching Ready. It also cannot change the owner, so a
+	// function they created would stay theirs and run as them.
+	//
+	// Conditional rather than an unconditional DROP-then-CREATE, because this
+	// function is on the client login path: recreating it on every ten-minute
+	// reconcile would put a window in front of every login, to fix a state
+	// that is almost never present.
+	stale, err := p.poolerAuthFunctionIsForeign(ctx, dbConn, t.AdminUser)
+	if err != nil {
+		return fmt.Errorf("inspect pooler auth function in %q: %w", database, err)
+	}
+	if stale {
+		if _, err := dbConn.Exec(ctx,
+			fmt.Sprintf("DROP FUNCTION IF EXISTS %s(TEXT)", qFunc),
+		); err != nil {
+			return fmt.Errorf("replace foreign pooler auth function in %q: %w", database, err)
+		}
+	}
+
+	for _, stmt := range []string{
 		getAuthDDL,
-		// CREATE OR REPLACE keeps the EXISTING owner, so replacing a function a
-		// tenant pre-created would leave it theirs and running as them. Harmless
-		// in itself — the body would then fail on pg_authid — but it would fail
-		// auth for a live service, so ownership is set explicitly.
 		fmt.Sprintf("ALTER FUNCTION %s(TEXT) OWNER TO %s", qFunc, qAdmin),
 		fmt.Sprintf("REVOKE ALL ON FUNCTION %s(TEXT) FROM PUBLIC", qFunc),
 		fmt.Sprintf("GRANT EXECUTE ON FUNCTION %s(TEXT) TO %s", qFunc, qAuth),
@@ -429,7 +462,62 @@ func (p Postgres) ensurePoolerAuth(ctx context.Context, conn *pgx.Conn, t Target
 			return fmt.Errorf("bootstrap pooler auth in %q: %w", database, err)
 		}
 	}
+
+	// Prove the lookup WORKS, rather than merely existing.
+	//
+	// The function body reads pg_authid, which is superuser-only, and it runs
+	// as t.AdminUser. An admin with CREATEROLE but not SUPERUSER — which this
+	// operator otherwise supports on purpose, see roleOwnerMarker — can create
+	// this function and have every call fail with permission denied. That
+	// failure would surface at client login, long after Ensure reported Ready
+	// with a URI that cannot connect: precisely the shape of bug this whole
+	// bootstrap exists to remove, reintroduced one level down.
+	//
+	// Calling it as the admin exercises the same rights the pooler's call will,
+	// because SECURITY DEFINER runs as the owner either way.
+	var probeUser string
+	if err := dbConn.QueryRow(ctx,
+		fmt.Sprintf("SELECT username FROM %s($1)", qFunc), database,
+	).Scan(&probeUser); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("pooler auth lookup in %q returned no row for %q, so the pooler cannot authenticate it",
+				database, database)
+		}
+		return fmt.Errorf("pooler auth lookup in %q failed — %s must be able to read pg_authid (SUPERUSER) for pooler access to work; set MIMIR_%s_POOLER_AUTH_ROLE=\"\" to publish direct-to-primary access instead: %w",
+			database, t.AdminUser, strings.ToUpper(string(mimirv1alpha1.EnginePostgres)), err)
+	}
 	return nil
+}
+
+// poolerAuthFunctionIsForeign reports whether a get_auth(TEXT) exists that is
+// not the one this operator writes — a different owner or a different return
+// type. Absent is not foreign: there is simply nothing to replace.
+func (Postgres) poolerAuthFunctionIsForeign(ctx context.Context, conn *pgx.Conn, admin string) (bool, error) {
+	var owner, result string
+	err := conn.QueryRow(ctx, `
+		SELECT p.proowner::regrole::text, pg_catalog.pg_get_function_result(p.oid)
+		  FROM pg_catalog.pg_proc p
+		  JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+		 WHERE n.nspname = $1
+		   AND p.proname = $2
+		   -- Matched on argument TYPES via proargtypes, not on a rendered
+		   -- argument list: pg_get_function_identity_arguments includes the
+		   -- parameter NAME ("p_username text"), so comparing it to "text"
+		   -- silently matches nothing and the guard never fires.
+		   AND p.pronargs = 1
+		   AND p.proargtypes[0] = 'text'::pg_catalog.regtype`,
+		poolerAuthSchema, poolerAuthFunction,
+	).Scan(&owner, &result)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	// regrole renders a name needing quotes with them, so compare both forms
+	// rather than assuming the admin role name is a bare identifier.
+	ownedByAdmin := owner == admin || owner == quoteIdentifier(admin)
+	return !ownedByAdmin || result != getAuthResultType, nil
 }
 
 // ValidateExtensions reports whether every requested extension is allowed.

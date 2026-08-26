@@ -115,6 +115,8 @@ Shared clusters are supplied by environment rather than discovered, so the opera
 
 Two things make that safe to default on. The bootstrap first checks whether the role exists and does nothing when it does not, so pointing this operator at a server with no such pooler is a no-op. And the function is `SECURITY DEFINER` living in a database the *tenant* owns, so it is created with `SET search_path = pg_catalog` and fully qualified references — without that, a tenant could shadow `pg_catalog` and have it run with admin rights.
 
+**Pooler access requires an admin role that can read `pg_authid`, which in practice means `SUPERUSER`.** The lookup function runs as the admin role, and `pg_authid` is superuser-only — `pg_read_all_data` does not cover it. A `CREATEROLE` admin can create the function and have every call fail at client login, so provisioning probes the lookup and refuses to report `Ready` when it does not work. If you want to run with a non-superuser admin, set `MIMIR_POSTGRES_POOLER_AUTH_ROLE=""` and point `MIMIR_POSTGRES_HOST` at the primary instead of the pooler.
+
 The failure mode this fixes was silent: pgBouncer reports the failed lookup to the client as `permission denied for database "x"`, which is exactly what a correctly refused cross-tenant attempt looks like.
 
 **Admin and consumer endpoints must differ when a pooler is in front.** `CREATE DATABASE` cannot run inside a transaction block, and a pooler in transaction mode wraps every statement in one — so admin traffic goes to the primary while consumers get the pooler. Pointing both at the pooler produces a confusing failure deep inside a reconcile.

@@ -623,11 +623,16 @@ func TestPoolerAuthBootstrap(t *testing.T) {
 
 	p := Postgres{}
 	db := testDB(t, "pooled")
+	// Registered BEFORE Ensure, unlike the tests above. Ensure now probes the
+	// lookup and can fail after the database exists and has granted the pooler
+	// role CONNECT — and that grant makes the role undroppable, so a cleanup
+	// registered only on success buries the real failure under a confusing
+	// "cannot be dropped because some objects depend on it".
+	cleanup(t, tgt, db)
 	creds, err := p.Ensure(ctx, tgt, db, "", Options{Owner: "ns/pooled/uid-1"})
 	if err != nil {
 		t.Fatalf("provisioning: %v", err)
 	}
-	cleanup(t, tgt, db)
 
 	// What pgBouncer actually does: connect AS the auth role INTO the tenant's
 	// database, then look the tenant's password up there.
@@ -743,11 +748,11 @@ func TestPoolerAuthReclaimsATenantOwnedSchema(t *testing.T) {
 	// First pass with no pooler configured, so the tenant gets a database with
 	// no pgbouncer schema in it yet.
 	tgt.PoolerAuthRole = ""
+	cleanup(t, tgt, db)
 	creds, err := p.Ensure(ctx, tgt, db, "", Options{Owner: "ns/squatted/uid-1"})
 	if err != nil {
 		t.Fatalf("provisioning: %v", err)
 	}
-	cleanup(t, tgt, db)
 
 	// The tenant squats the name, as it is entitled to do in its own database.
 	tenantConn, err := pgx.Connect(ctx, tenantURI(tgt, creds.Username, creds.Password, db))
@@ -757,10 +762,15 @@ func TestPoolerAuthReclaimsATenantOwnedSchema(t *testing.T) {
 	if _, err := tenantConn.Exec(ctx, "CREATE SCHEMA pgbouncer"); err != nil {
 		t.Fatalf("tenant creating the pgbouncer schema: %v", err)
 	}
+	// A DIFFERENT return type on purpose, because that is the case the
+	// bootstrap cannot talk its way out of: CREATE OR REPLACE can change a
+	// function's body but not its signature, so this one has to be dropped or
+	// every reconcile from here on fails on the DDL and the DataService never
+	// reaches Ready.
 	if _, err := tenantConn.Exec(ctx, `
 		CREATE FUNCTION pgbouncer.get_auth(p_username TEXT)
-		  RETURNS TABLE (username TEXT, password TEXT)
-		  LANGUAGE sql AS $$ SELECT 'nobody'::TEXT, 'nothing'::TEXT $$`,
+		  RETURNS TEXT
+		  LANGUAGE sql AS $$ SELECT 'nothing'::TEXT $$`,
 	); err != nil {
 		t.Fatalf("tenant creating a decoy get_auth: %v", err)
 	}
@@ -788,6 +798,81 @@ func TestPoolerAuthReclaimsATenantOwnedSchema(t *testing.T) {
 	}
 	if gotUser != creds.Username || gotSecret == "nothing" {
 		t.Fatalf("auth_query still answering from the tenant's decoy: user=%q secret=%q", gotUser, gotSecret)
+	}
+
+	// The replacement must belong to the admin role. A function left owned by
+	// the tenant runs as the tenant under SECURITY DEFINER, which fails closed
+	// on pg_authid — safe, but it breaks auth for a live service.
+	adminConn, err := pgx.Connect(ctx, tenantURI(tgt, tgt.AdminUser, tgt.AdminPassword, db))
+	if err != nil {
+		t.Fatalf("admin connect to %q: %v", db, err)
+	}
+	defer func() { _ = adminConn.Close(ctx) }()
+
+	var funcOwner string
+	if err := adminConn.QueryRow(ctx, `
+		SELECT p.proowner::regrole::text
+		  FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+		 WHERE n.nspname = 'pgbouncer' AND p.proname = 'get_auth'`,
+	).Scan(&funcOwner); err != nil {
+		t.Fatalf("reading the reclaimed function's owner: %v", err)
+	}
+	if funcOwner != tgt.AdminUser {
+		t.Errorf("reclaimed get_auth owned by %q, want %q", funcOwner, tgt.AdminUser)
+	}
+
+	// Reconciling again must be a no-op rather than another drop-and-create.
+	// This function is on the client login path, so recreating it every pass
+	// would put a window in front of every login.
+	if err := (Postgres{}).ensurePoolerAuth(ctx, adminConn, tgt, db); err != nil {
+		t.Fatalf("second pooler bootstrap over our own function: %v", err)
+	}
+	foreign, err := (Postgres{}).poolerAuthFunctionIsForeign(ctx, adminConn, tgt.AdminUser)
+	if err != nil {
+		t.Fatalf("inspecting the function after reconcile: %v", err)
+	}
+	if foreign {
+		t.Error("our own get_auth is classified as foreign, so every reconcile would drop and recreate it")
+	}
+}
+
+// TestGetAuthResultTypeMatchesTheServer pins the constant used to recognise a
+// function of this name that is not ours.
+//
+// It is a rendering produced by the server, not a string this package
+// controls, so a wording change between PostgreSQL versions would silently
+// make every reconcile classify our own function as foreign — dropping and
+// recreating it on the login path every pass.
+func TestGetAuthResultTypeMatchesTheServer(t *testing.T) {
+	tgt := testTarget(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	authRole := createPoolerRole(t, tgt)
+	tgt.PoolerAuthRole = authRole
+
+	db := testDB(t, "resulttype")
+	cleanup(t, tgt, db)
+	if _, err := (Postgres{}).Ensure(ctx, tgt, db, "", Options{}); err != nil {
+		t.Fatalf("provisioning: %v", err)
+	}
+
+	conn, err := pgx.Connect(ctx, tenantURI(tgt, tgt.AdminUser, tgt.AdminPassword, db))
+	if err != nil {
+		t.Fatalf("admin connect to %q: %v", db, err)
+	}
+	defer func() { _ = conn.Close(ctx) }()
+
+	var result string
+	if err := conn.QueryRow(ctx, `
+		SELECT pg_get_function_result(p.oid)
+		  FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+		 WHERE n.nspname = 'pgbouncer' AND p.proname = 'get_auth'`,
+	).Scan(&result); err != nil {
+		t.Fatalf("reading the function result type: %v", err)
+	}
+	if result != getAuthResultType {
+		t.Errorf("server reports result type %q, but getAuthResultType is %q", result, getAuthResultType)
 	}
 }
 
