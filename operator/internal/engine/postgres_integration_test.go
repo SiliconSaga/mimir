@@ -259,6 +259,126 @@ func TestDropRefusesAnotherOwnersDatabase(t *testing.T) {
 	}
 }
 
+// TestRecoversFromInterruptedCreate covers the crash window that the ownership
+// marker itself opened.
+//
+// CREATE DATABASE cannot run inside a transaction, so a crash between creating
+// the database and stamping its marker leaves an unmarked database. Rejecting
+// that outright wedges the request forever — and because status is never
+// populated, deletion has no name to clean up either. Adoption is allowed only
+// on proof: the database is owned by a role already carrying our marker, which
+// only we could have arranged.
+func TestRecoversFromInterruptedCreate(t *testing.T) {
+	tgt := testTarget(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	p := Postgres{}
+	db := testDB(t, "tenant_interrupted")
+	const owner = "team-a/app/uid-1111"
+
+	// Provision normally, then strip the database marker to reproduce the
+	// state a crash between CREATE and COMMENT would leave behind.
+	if _, err := p.Ensure(ctx, tgt, db, "", Options{Owner: owner}); err != nil {
+		t.Fatalf("initial provisioning: %v", err)
+	}
+	cleanup(t, tgt, db)
+
+	admin, err := pgx.Connect(ctx, adminURI(tgt))
+	if err != nil {
+		t.Fatalf("admin connect: %v", err)
+	}
+	defer admin.Close(ctx)
+	if _, err := admin.Exec(ctx, "COMMENT ON DATABASE "+quoteIdentifier(db)+" IS NULL"); err != nil {
+		t.Fatalf("clearing the database marker: %v", err)
+	}
+
+	// The next reconcile must recover rather than wedge.
+	creds, err := p.Ensure(ctx, tgt, db, "", Options{Owner: owner})
+	if err != nil {
+		t.Fatalf("did not recover from an interrupted create: %v", err)
+	}
+	if err := connectAs(ctx, tgt, creds.Username, creds.Password, db); err != nil {
+		t.Fatalf("recovered database is not usable: %v", err)
+	}
+
+	// And the marker is back, so a different owner is refused again.
+	if _, err := p.Ensure(ctx, tgt, db, "", Options{Owner: "team-b/app/uid-2222"}); err == nil {
+		t.Fatal("recovery left the database adoptable by anyone")
+	}
+}
+
+// TestReassertsDatabaseOwner covers an administrator reassigning ownership by
+// hand. The API promises an owning role, so losing it must not read as Ready.
+func TestReassertsDatabaseOwner(t *testing.T) {
+	tgt := testTarget(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	p := Postgres{}
+	db := testDB(t, "tenant_ownerdrift")
+	const owner = "team-a/app/uid-3333"
+
+	if _, err := p.Ensure(ctx, tgt, db, "", Options{Owner: owner}); err != nil {
+		t.Fatalf("provisioning: %v", err)
+	}
+	cleanup(t, tgt, db)
+
+	admin, err := pgx.Connect(ctx, adminURI(tgt))
+	if err != nil {
+		t.Fatalf("admin connect: %v", err)
+	}
+	defer admin.Close(ctx)
+	if _, err := admin.Exec(ctx,
+		"ALTER DATABASE "+quoteIdentifier(db)+" OWNER TO postgres"); err != nil {
+		t.Fatalf("reassigning ownership: %v", err)
+	}
+
+	if _, err := p.Ensure(ctx, tgt, db, "", Options{Owner: owner}); err != nil {
+		t.Fatalf("reconcile after ownership drift: %v", err)
+	}
+
+	var got string
+	if err := admin.QueryRow(ctx,
+		`SELECT r.rolname FROM pg_database d JOIN pg_roles r ON r.oid = d.datdba
+		  WHERE d.datname = $1`, db).Scan(&got); err != nil {
+		t.Fatalf("reading owner: %v", err)
+	}
+	if got != db {
+		t.Errorf("owner not restored: database is owned by %q, want %q", got, db)
+	}
+}
+
+// TestOwnerMarkerIsPerObjectNotPerName covers the force-delete orphan.
+//
+// Deleting a DataService whose database could not be dropped leaves the
+// database behind. Recreating an object with the SAME namespace and name must
+// not inherit it — with a name-only marker it would, silently adopting the
+// orphan and rotating its password.
+func TestOwnerMarkerIsPerObjectNotPerName(t *testing.T) {
+	tgt := testTarget(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	p := Postgres{}
+	db := testDB(t, "tenant_reincarnated")
+
+	// Same namespace and name, different object identity.
+	const first = "team-a/app/uid-aaaa"
+	const second = "team-a/app/uid-bbbb"
+
+	if _, err := p.Ensure(ctx, tgt, db, "", Options{Owner: first}); err != nil {
+		t.Fatalf("provisioning the original: %v", err)
+	}
+	cleanup(t, tgt, db)
+
+	_, err := p.Ensure(ctx, tgt, db, "", Options{Owner: second})
+	var notOwned *ErrNotOwned
+	if !errors.As(err, &notOwned) {
+		t.Fatalf("a replacement object inherited the orphaned database, got %v", err)
+	}
+}
+
 // TestRefusesToAdoptAnUnmarkedRole guards the privilege-escalation shape of the
 // same problem. Adopting an existing role by name hands the tenant whatever
 // that role already carries, and then publishes a password for it.

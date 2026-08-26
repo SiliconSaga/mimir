@@ -224,8 +224,16 @@ func (d *DataService) ResolvedDatabaseName() string {
 
 // Owner is the identity recorded on the provisioned database so a later
 // reconcile — of this object or any other — can tell whose it is.
+//
+// The UID is part of it, and that is the whole point. A namespace/name pair is
+// not a durable Kubernetes identity: delete a DataService whose database could
+// not be dropped (the force-delete escape hatch), recreate one with the same
+// name, and a name-only marker would match — silently adopting the orphaned
+// database and rotating its role password, which is exactly the adoption the
+// marker exists to prevent. The UID is unique per object, so a replacement
+// reports a conflict and a human decides what to do with the orphan.
 func (d *DataService) Owner() string {
-	return d.Namespace + "/" + d.Name
+	return d.Namespace + "/" + d.Name + "/" + string(d.UID)
 }
 
 // DerivePhysicalName builds a valid, collision-free SQL identifier from a

@@ -73,7 +73,32 @@ func (p Postgres) Ensure(ctx context.Context, t Target, database, current string
 			return creds, err
 		}
 		if owner != opts.Owner {
-			return creds, &ErrNotOwned{Database: database, Want: opts.Owner, Got: owner}
+			// An UNMARKED database might be our own half-finished work rather
+			// than a stranger's. CREATE DATABASE cannot run in a transaction,
+			// so a crash between creating it and stamping the marker leaves
+			// exactly this state — and rejecting it outright would wedge the
+			// request permanently, with status never populated and therefore
+			// nothing recorded for deletion to clean up either.
+			//
+			// The role is created and marked BEFORE the database, so a database
+			// owned by a role bearing our marker can only have been created by
+			// us. That is a narrow enough proof to adopt on: it does not let us
+			// claim any database that merely happens to be unmarked.
+			adoptable := false
+			if owner == "" {
+				roleMarker, rerr := p.roleOwnerMarker(ctx, conn, role)
+				if rerr != nil {
+					return creds, rerr
+				}
+				dbOwner, oerr := p.databaseOwningRole(ctx, conn, database)
+				if oerr != nil {
+					return creds, oerr
+				}
+				adoptable = roleMarker == opts.Owner && dbOwner == role
+			}
+			if !adoptable {
+				return creds, &ErrNotOwned{Database: database, Want: opts.Owner, Got: owner}
+			}
 		}
 	}
 
@@ -139,6 +164,16 @@ func (p Postgres) Ensure(ctx context.Context, t Target, database, current string
 		); err != nil {
 			return creds, fmt.Errorf("create database %q: %w", database, err)
 		}
+	}
+
+	// Reassert the owning role on every pass, not just at creation. The API
+	// promises an owning role, and an administrator reassigning ownership by
+	// hand would otherwise cost the tenant owner-only rights — including
+	// public-schema DDL under PostgreSQL 15 — while this still reported Ready.
+	if _, err := conn.Exec(ctx,
+		fmt.Sprintf("ALTER DATABASE %s OWNER TO %s", qDB, qRole),
+	); err != nil {
+		return creds, fmt.Errorf("set owner of %q to %q: %w", database, role, err)
 	}
 
 	// Stamp ownership. COMMENT ON DATABASE is used rather than a side table
@@ -213,6 +248,26 @@ func (Postgres) databaseOwnerMarker(ctx context.Context, conn *pgx.Conn, databas
 		return "", nil
 	}
 	return strings.TrimPrefix(*comment, ownerMarkerPrefix), nil
+}
+
+// databaseOwningRole returns the name of the role that owns a database.
+//
+// Used only to decide whether an unmarked database is our own interrupted work,
+// so it is deliberately a fact about the server rather than about our marker.
+func (Postgres) databaseOwningRole(ctx context.Context, conn *pgx.Conn, database string) (string, error) {
+	var owner string
+	if err := conn.QueryRow(ctx,
+		`SELECT r.rolname FROM pg_database d
+		   JOIN pg_roles r ON r.oid = d.datdba
+		  WHERE d.datname = $1`,
+		database,
+	).Scan(&owner); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", nil
+		}
+		return "", fmt.Errorf("read owning role of %q: %w", database, err)
+	}
+	return owner, nil
 }
 
 // roleOwnerMarker returns the owner recorded on a role, or "" when there is no
