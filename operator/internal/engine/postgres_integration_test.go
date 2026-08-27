@@ -827,7 +827,7 @@ func TestPoolerAuthReclaimsATenantOwnedSchema(t *testing.T) {
 	if err := (Postgres{}).ensurePoolerAuth(ctx, adminConn, tgt, db); err != nil {
 		t.Fatalf("second pooler bootstrap over our own function: %v", err)
 	}
-	gotOwner, present, err := (Postgres{}).poolerAuthFunctionOwner(ctx, adminConn)
+	gotOwner, _, present, err := (Postgres{}).poolerAuthFunctionOwner(ctx, adminConn)
 	if err != nil {
 		t.Fatalf("inspecting the function after reconcile: %v", err)
 	}
@@ -859,6 +859,27 @@ func TestPoolerAuthLeavesTheServersOwnFunctionAlone(t *testing.T) {
 
 	p := Postgres{}
 	db := testDB(t, "preinstalled")
+
+	// Named and scheduled for removal BEFORE the database cleanup is
+	// registered, because t.Cleanup runs LIFO: this role ends up owning a
+	// function inside that database, so dropping it first fails with "cannot
+	// be dropped because some objects depend on it" and buries whatever the
+	// test was actually reporting. DROP ROLE IF EXISTS is a no-op if the test
+	// never got as far as creating it.
+	serverOwner := testDB(t, "srv_owner")
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		conn, err := pgx.Connect(ctx, adminURI(tgt))
+		if err != nil {
+			t.Errorf("cleanup: connecting to drop %q: %v", serverOwner, err)
+			return
+		}
+		defer func() { _ = conn.Close(ctx) }()
+		if _, err := conn.Exec(ctx, "DROP ROLE IF EXISTS "+quoteIdentifier(serverOwner)); err != nil {
+			t.Errorf("cleanup: dropping %q: %v", serverOwner, err)
+		}
+	})
 	cleanup(t, tgt, db)
 
 	// Provision with no pooler configured, then plant the server's flavour of
@@ -875,9 +896,24 @@ func TestPoolerAuthLeavesTheServersOwnFunctionAlone(t *testing.T) {
 	}
 	defer func() { _ = adminConn.Close(ctx) }()
 
+	// Owned by a DIFFERENT superuser than the configured admin. Percona creates
+	// the function as `postgres`, while MIMIR_POSTGRES_ADMIN_SECRET may name
+	// another superuser — and a preserve rule that only recognised our own
+	// admin name would drop the cluster operator's function and install our
+	// weaker one over it.
+	if _, err := adminConn.Exec(ctx,
+		fmt.Sprintf("CREATE ROLE %s WITH SUPERUSER", quoteIdentifier(serverOwner)),
+	); err != nil {
+		t.Fatalf("creating the stand-in server owner: %v", err)
+	}
+
 	// Percona's definition, verbatim in the parts that matter: parameter named
 	// `username`, and a marker in the body so a silent overwrite is visible.
-	if _, err := adminConn.Exec(ctx, `
+	//
+	// Deliberately left in the DANGEROUS shape a forgetful install produces —
+	// PUBLIC has USAGE on the schema and keeps PostgreSQL's default EXECUTE on
+	// the function. Preserving the definition must not mean preserving that.
+	if _, err := adminConn.Exec(ctx, fmt.Sprintf(`
 		CREATE SCHEMA IF NOT EXISTS pgbouncer;
 		CREATE OR REPLACE FUNCTION pgbouncer.get_auth(username TEXT)
 		  RETURNS TABLE (username TEXT, password TEXT)
@@ -885,7 +921,11 @@ func TestPoolerAuthLeavesTheServersOwnFunctionAlone(t *testing.T) {
 		AS $$ SELECT rolname::TEXT, rolpassword::TEXT || ''::TEXT
 		        FROM pg_catalog.pg_authid
 		       WHERE rolname = $1 AND rolcanlogin AND NOT rolsuper $$;
-		COMMENT ON FUNCTION pgbouncer.get_auth(TEXT) IS 'installed-by-the-server'`,
+		COMMENT ON FUNCTION pgbouncer.get_auth(TEXT) IS 'installed-by-the-server';
+		ALTER FUNCTION pgbouncer.get_auth(TEXT) OWNER TO %s;
+		GRANT USAGE ON SCHEMA pgbouncer TO PUBLIC;
+		GRANT EXECUTE ON FUNCTION pgbouncer.get_auth(TEXT) TO PUBLIC`,
+		quoteIdentifier(serverOwner)),
 	); err != nil {
 		t.Fatalf("planting the server's get_auth: %v", err)
 	}
@@ -924,6 +964,34 @@ func TestPoolerAuthLeavesTheServersOwnFunctionAlone(t *testing.T) {
 	if gotUser != creds.Username || gotSecret == "" {
 		t.Fatalf("auth_query returned user=%q secret empty=%t", gotUser, gotSecret == "")
 	}
+
+	// Preserving the server's function must not mean preserving its exposure.
+	//
+	// The planted function above keeps PostgreSQL's default EXECUTE grant to
+	// PUBLIC, exactly as a CREATE FUNCTION that forgot to revoke would — and
+	// this lookup returns the password verifier of every login role on the
+	// cluster. Leaving the definition alone while narrowing who may call it is
+	// the whole distinction between deferring to the server's authentication
+	// policy and inheriting its accidents.
+	t.Run("tenant cannot read the preserved lookup", func(t *testing.T) {
+		conn, err := pgx.Connect(ctx, tenantURI(tgt, creds.Username, creds.Password, db))
+		if err != nil {
+			t.Fatalf("tenant cannot reach its own database: %v", err)
+		}
+		defer func() { _ = conn.Close(ctx) }()
+
+		var u, s string
+		err = conn.QueryRow(ctx,
+			"SELECT username, password FROM pgbouncer.get_auth($1)", creds.Username).Scan(&u, &s)
+		if err == nil {
+			t.Fatal("PRIVILEGE LEAK: a tenant can read password verifiers through the preserved pgbouncer.get_auth")
+		}
+		msg := strings.ToLower(err.Error())
+		if !strings.Contains(msg, "permission denied for schema") &&
+			!strings.Contains(msg, "permission denied for function") {
+			t.Fatalf("tenant was refused, but not by the grants on the lookup — got %v", err)
+		}
+	})
 }
 
 // TestPoolerAuthSkippedWhenRoleAbsent keeps this operator usable against a

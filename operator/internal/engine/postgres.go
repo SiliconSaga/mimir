@@ -434,23 +434,30 @@ func (p Postgres) ensurePoolerAuth(ctx context.Context, conn *pgx.Conn, t Target
 	// So the rule is: do not touch a function the server put there. Replacing
 	// it on every reconcile would quietly swap the cluster operator's security
 	// decisions for ours, and it sits on the client login path.
-	owner, present, err := p.poolerAuthFunctionOwner(ctx, dbConn)
+	//
+	// "The server put it there" is judged by SUPERUSER, not by matching our own
+	// admin name. Percona creates the function as `postgres`, while
+	// MIMIR_POSTGRES_ADMIN_SECRET may legitimately name a different superuser —
+	// and an owner check that only accepted our own name would then drop the
+	// cluster operator's function and install our weaker one in its place. Our
+	// own admin is accepted too, so a fallback we wrote is not re-created on
+	// every pass when that admin is not a superuser.
+	owner, isSuper, present, err := p.poolerAuthFunctionOwner(ctx, dbConn)
 	if err != nil {
 		return fmt.Errorf("inspect pooler auth function in %q: %w", database, err)
 	}
-	ownedByAdmin := owner == t.AdminUser || owner == qAdmin
+	preserve := present && (isSuper || owner == t.AdminUser || owner == qAdmin)
 
-	if !present || !ownedByAdmin {
+	if !preserve {
 		// Either nothing is there — a server with no such pooler integration,
 		// where the fallback is what makes the published URI usable at all —
-		// or a tenant put it there. The tenant owns this database and can
-		// CREATE in it, and a definer function of theirs would run as them, so
-		// that one is dropped rather than replaced: CREATE OR REPLACE can
+		// or an unprivileged role put it there, which on a database the tenant
+		// owns means the tenant. A definer function of theirs would run as
+		// them, so it is dropped rather than replaced: CREATE OR REPLACE can
 		// change neither an owner nor a return type.
 		stmts := []string{
 			fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", qSchema),
 			fmt.Sprintf("ALTER SCHEMA %s OWNER TO %s", qSchema, qAdmin),
-			fmt.Sprintf("REVOKE ALL ON SCHEMA %s FROM PUBLIC", qSchema),
 		}
 		if present {
 			stmts = append(stmts, fmt.Sprintf("DROP FUNCTION IF EXISTS %s(TEXT)", qFunc))
@@ -458,7 +465,6 @@ func (p Postgres) ensurePoolerAuth(ctx context.Context, conn *pgx.Conn, t Target
 		stmts = append(stmts,
 			getAuthDDL,
 			fmt.Sprintf("ALTER FUNCTION %s(TEXT) OWNER TO %s", qFunc, qAdmin),
-			fmt.Sprintf("REVOKE ALL ON FUNCTION %s(TEXT) FROM PUBLIC", qFunc),
 		)
 		for _, stmt := range stmts {
 			if _, err := dbConn.Exec(ctx, stmt); err != nil {
@@ -467,15 +473,27 @@ func (p Postgres) ensurePoolerAuth(ctx context.Context, conn *pgx.Conn, t Target
 		}
 	}
 
-	// Grants are reasserted either way, and cheaply: they are what the pooler
-	// actually needs, they are idempotent, and inheriting them from template1
-	// is an assumption about someone else's template rather than a fact.
+	// Privileges are reasserted on BOTH paths, and the revokes matter more than
+	// the grants.
+	//
+	// PostgreSQL grants EXECUTE on a new function to PUBLIC by default. This
+	// one returns the password verifier of every login role on the shared
+	// cluster, so a preserved function that kept that default would let any
+	// tenant read every other tenant's credential out of its own database —
+	// a worse leak than the isolation this operator exists to provide, and one
+	// we would be inheriting rather than causing. Percona happens to revoke it,
+	// but "happens to" is not a property to build tenant isolation on.
+	//
+	// Narrowing someone else's object is not the same as redefining it: the
+	// authentication policy in the function body stays theirs.
 	for _, stmt := range []string{
+		fmt.Sprintf("REVOKE ALL ON SCHEMA %s FROM PUBLIC", qSchema),
+		fmt.Sprintf("REVOKE ALL ON FUNCTION %s(TEXT) FROM PUBLIC", qFunc),
 		fmt.Sprintf("GRANT USAGE ON SCHEMA %s TO %s", qSchema, qAuth),
 		fmt.Sprintf("GRANT EXECUTE ON FUNCTION %s(TEXT) TO %s", qFunc, qAuth),
 	} {
 		if _, err := dbConn.Exec(ctx, stmt); err != nil {
-			return fmt.Errorf("grant pooler auth in %q: %w", database, err)
+			return fmt.Errorf("scope pooler auth in %q: %w", database, err)
 		}
 	}
 
@@ -522,35 +540,60 @@ func (Postgres) verifyPoolerAuth(ctx context.Context, dbConn *pgx.Conn, t Target
 		return fmt.Errorf("pooler role %q cannot reach the auth lookup in %q (schema usage=%t, function execute=%t), so the published URI cannot authenticate",
 			authRole, database, canUse, canExec)
 	}
+
+	// And the other direction: nobody ELSE may reach it. This function hands
+	// back the password verifier of every login role on the shared cluster, so
+	// PUBLIC being able to call it turns each tenant's own database into a
+	// window onto every other tenant's credential. The revokes above are meant
+	// to guarantee that; this asserts it, because a revoke that silently did
+	// not apply is indistinguishable from one that did.
+	var publicUse, publicExec bool
+	if err := dbConn.QueryRow(ctx, `
+		SELECT pg_catalog.has_schema_privilege('public', $1, 'USAGE'),
+		       pg_catalog.has_function_privilege('public', $2, 'EXECUTE')`,
+		poolerAuthSchema, poolerAuthSchema+"."+poolerAuthFunction+"(text)",
+	).Scan(&publicUse, &publicExec); err != nil {
+		return fmt.Errorf("check public access to the auth lookup in %q: %w", database, err)
+	}
+	if publicUse && publicExec {
+		return fmt.Errorf("PUBLIC can execute the auth lookup in %q, which would let any tenant read every login role's password verifier — refusing to publish this database",
+			database)
+	}
 	return nil
 }
 
-// poolerAuthFunctionOwner returns the owner of get_auth(TEXT) and whether one
-// exists at all.
+// poolerAuthFunctionOwner returns the owner of get_auth(TEXT), whether that
+// owner is a superuser, and whether the function exists at all.
+//
+// rolsuper comes from pg_roles rather than pg_authid: pg_authid is readable by
+// superusers only, and this runs before anything has established that the
+// configured admin is one. pg_roles is the public view over the same rows.
 //
 // Matched on argument TYPES via proargtypes rather than on a rendered argument
 // list: pg_get_function_identity_arguments includes the parameter NAME
 // ("username text"), so comparing it to "text" silently matches nothing and
 // every caller reads absent.
-func (Postgres) poolerAuthFunctionOwner(ctx context.Context, conn *pgx.Conn) (string, bool, error) {
+func (Postgres) poolerAuthFunctionOwner(ctx context.Context, conn *pgx.Conn) (string, bool, bool, error) {
 	var owner string
+	var isSuper bool
 	err := conn.QueryRow(ctx, `
-		SELECT p.proowner::regrole::text
+		SELECT r.rolname, r.rolsuper
 		  FROM pg_catalog.pg_proc p
 		  JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+		  JOIN pg_catalog.pg_roles r ON r.oid = p.proowner
 		 WHERE n.nspname = $1
 		   AND p.proname = $2
 		   AND p.pronargs = 1
 		   AND p.proargtypes[0] = 'text'::pg_catalog.regtype`,
 		poolerAuthSchema, poolerAuthFunction,
-	).Scan(&owner)
+	).Scan(&owner, &isSuper)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", false, nil
+		return "", false, false, nil
 	}
 	if err != nil {
-		return "", false, err
+		return "", false, false, err
 	}
-	return owner, true, nil
+	return owner, isSuper, true, nil
 }
 
 // ValidateExtensions reports whether every requested extension is allowed.
