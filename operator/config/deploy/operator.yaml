@@ -83,7 +83,7 @@ spec:
           # same name. A swapped tag changes what the cluster runs while every
           # manifest still reads identically, so "is the fix deployed?" stops
           # being answerable from git at all.
-          image: ghcr.io/siliconsaga/mimir-dataservice:0.2.0
+          image: ghcr.io/siliconsaga/mimir-dataservice:0.2.1
           # Always, because the VERSION tag stays MUTABLE pre-1.0 — CI
           # republishes it for changes that do not earn a bump. The default for
           # a non-`latest` tag is IfNotPresent, which trusts whatever already
