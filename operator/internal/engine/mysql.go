@@ -57,6 +57,9 @@ func (m MySQL) Ensure(ctx context.Context, t Target, database, current string, o
 	if err := ValidateIdentifier(database); err != nil {
 		return creds, err
 	}
+	if database == ownerSchema {
+		return creds, errReservedDatabase(database)
+	}
 	user := mysqlUserName(database)
 
 	password := current
@@ -75,6 +78,10 @@ func (m MySQL) Ensure(ctx context.Context, t Target, database, current string, o
 
 	qDB := quoteMySQLIdentifier(database)
 
+	if err := m.ensureOwnerRegister(ctx, db); err != nil {
+		return creds, err
+	}
+
 	// Ownership is checked BEFORE anything is mutated, for the same reason as
 	// Postgres: discovering the conflict after ALTER USER would have rotated a
 	// live tenant's password on the way to reporting it.
@@ -82,29 +89,45 @@ func (m MySQL) Ensure(ctx context.Context, t Target, database, current string, o
 	if err != nil {
 		return creds, err
 	}
-	if dbExists && opts.Owner != "" {
+
+	if opts.Owner != "" {
 		owner, err := m.databaseOwnerMarker(ctx, db, database)
 		if err != nil {
 			return creds, err
 		}
-		if owner != opts.Owner {
-			// An UNMARKED database may be our own interrupted work. MySQL DDL
-			// does not roll back, so a crash between CREATE DATABASE and the
-			// marker table leaves exactly this. The user is created and marked
-			// first, so a database with no marker whose derived user carries
-			// our marker can only be ours — the same narrow proof Postgres
-			// uses, with user-attribute standing in for role comment.
-			adoptable := false
-			if owner == "" {
-				userMarker, uerr := m.userOwnerMarker(ctx, db, user)
-				if uerr != nil {
-					return creds, uerr
-				}
-				adoptable = userMarker == opts.Owner
-			}
-			if !adoptable {
-				return creds, &ErrNotOwned{Database: database, Want: opts.Owner, Got: owner}
-			}
+
+		switch {
+		case owner == opts.Owner:
+			// Ours. Carry on.
+
+		case owner != "" && !dbExists:
+			// A record with no database behind it. Either the database was
+			// dropped by hand, or a previous run died between recording
+			// ownership and creating it. Neither leaves data to protect, so the
+			// name is free — refusing here would strand it permanently, needing
+			// a human to clear a row nobody can see.
+
+		case owner != "":
+			return creds, &ErrNotOwned{Database: database, Want: opts.Owner, Got: owner}
+
+		case dbExists:
+			// No record, but the database is there — so it was created outside
+			// the operator, or by something predating the register. Adopting it
+			// would hand this tenant another's data and publish a password for
+			// it, which is exactly what the marker exists to prevent.
+			//
+			// Note this is now the ONLY unmarked case, because ownership is
+			// recorded before the database is created rather than after. The
+			// earlier tenant-side marker had a crash window between the two and
+			// needed the user's own marker as a fallback proof; moving the
+			// register admin-side closed the window instead of working around it.
+			return creds, &ErrNotOwned{Database: database, Want: opts.Owner, Got: ""}
+		}
+
+		// Recorded BEFORE the database is created. The reverse order is what
+		// produced the crash window described above.
+		if err := m.writeOwnerMarker(ctx, db, database, opts.Owner); err != nil {
+			return creds, err
 		}
 	}
 
@@ -198,19 +221,6 @@ func (m MySQL) Ensure(ctx context.Context, t Target, database, current string, o
 		return creds, fmt.Errorf("grant on %q to %q: %w", database, user, err)
 	}
 
-	// Stamp ownership on the database itself. MySQL has no COMMENT ON DATABASE
-	// — the one piece of Postgres's design with no direct equivalent — so the
-	// marker is a table inside the tenant database. That keeps the property
-	// that made the Postgres comment the right choice: it lives with the
-	// database, so it cannot drift out of sync and it disappears exactly when
-	// the database does. A side table in the admin schema would outlive a
-	// hand-dropped database and then refuse to recreate it.
-	if opts.Owner != "" {
-		if err := m.writeOwnerMarker(ctx, t, database, opts.Owner); err != nil {
-			return creds, err
-		}
-	}
-
 	return Credentials{
 		Host:     t.Host,
 		Port:     t.Port,
@@ -228,6 +238,9 @@ func (m MySQL) Drop(ctx context.Context, t Target, database, owner string) error
 	if err := ValidateIdentifier(database); err != nil {
 		return err
 	}
+	if database == ownerSchema {
+		return errReservedDatabase(database)
+	}
 	user := mysqlUserName(database)
 
 	db, err := m.connect(ctx, t, t.AdminDatabase)
@@ -236,19 +249,32 @@ func (m MySQL) Drop(ctx context.Context, t Target, database, owner string) error
 	}
 	defer func() { _ = db.Close() }()
 
+	if err := m.ensureOwnerRegister(ctx, db); err != nil {
+		return err
+	}
+
 	if owner != "" {
-		exists, err := m.databaseExists(ctx, db, database)
+		// Checked against the register unconditionally, not only when the
+		// database still exists. The register is the authority now, and a
+		// database that has already been dropped by hand still needs its row
+		// cleared — otherwise the name looks taken forever.
+		marker, err := m.databaseOwnerMarker(ctx, db, database)
 		if err != nil {
 			return err
 		}
-		if exists {
-			marker, err := m.databaseOwnerMarker(ctx, db, database)
+		if marker != "" && marker != owner {
+			// Someone else's. Leave the database, the user and the record
+			// alone — this is "nothing here is mine", not an error.
+			return nil
+		}
+		if marker == "" {
+			exists, err := m.databaseExists(ctx, db, database)
 			if err != nil {
 				return err
 			}
-			if marker != owner {
-				// Someone else's, or made by hand. Leave the database and the
-				// user alone — this is "nothing here is mine", not an error.
+			if exists {
+				// Unrecorded but present: created outside the operator, so not
+				// ours to destroy.
 				return nil
 			}
 		}
@@ -281,74 +307,114 @@ func (m MySQL) Drop(ctx context.Context, t Target, database, owner string) error
 	); err != nil {
 		return fmt.Errorf("drop user %q: %w", user, err)
 	}
-	return nil
+
+	// Last, so a failure anywhere above leaves the record in place and the next
+	// attempt still knows the database was ours. Clearing it first would turn a
+	// half-finished drop into an unrecorded database that nothing will clean up.
+	return m.deleteOwnerMarker(ctx, db, database)
 }
 
-// ownerMarkerTable is the table holding the ownership marker, inside the
-// tenant's own database. Leading underscore keeps it out of the way of
-// application tables sorted by name.
-const ownerMarkerTable = "_mimir_ownership"
-
-// writeOwnerMarker records the owner in a table inside the tenant database.
+// The ownership register lives in a schema of the operator's own, NOT inside
+// the tenant's database.
 //
-// Connects to the tenant database rather than the admin one because that is
-// where the table lives; MySQL has no cross-database DDL shortcut worth the
-// string concatenation it would take.
-func (m MySQL) writeOwnerMarker(ctx context.Context, t Target, database, owner string) error {
-	conn, err := m.connect(ctx, t, database)
-	if err != nil {
-		return fmt.Errorf("connect to %q to record owner: %w", database, err)
-	}
-	defer func() { _ = conn.Close() }()
+// Postgres can afford to put its marker on the object itself, and this code
+// originally copied that with a `_mimir_ownership` table inside each tenant
+// database. That was wrong, and specifically because of how MySQL grants work:
+// `GRANT ALL PRIVILEGES ON <db>.*` reaches every table in the database,
+// including the marker. A tenant could rewrite or drop their own ownership
+// record — and the damaging direction is not the obvious one. Pointing the
+// marker at somebody else makes `Ensure` refuse, which is merely a
+// self-inflicted outage; but it also makes `Drop` return nil without deleting
+// anything, so removing the DataService would leave the database and its data
+// behind, orphaned and invisible to the operator.
+//
+// A table-level REVOKE cannot fix that. MySQL privileges are additive: the
+// database-level grant still applies, so the tenant keeps the access.
+//
+// The cost of moving it out is the drift the original comment worried about —
+// a marker can now outlive a hand-dropped database. That is handled explicitly
+// where it is read, rather than avoided by leaving the marker writable.
+const (
+	ownerSchema = "mimir_dataservice"
+	ownerTable  = "ownership"
+)
 
-	if _, err := conn.ExecContext(ctx, fmt.Sprintf(
-		`CREATE TABLE IF NOT EXISTS %s (
-			id TINYINT NOT NULL PRIMARY KEY,
+// errReservedDatabase rejects a tenant asking for the operator's own schema.
+//
+// Not hypothetical: `ValidateIdentifier` happily accepts "mimir_dataservice",
+// and a DataService in namespace `mimir` named `dataservice` derives exactly
+// that. Provisioning it would hand that tenant `GRANT ALL` over the ownership
+// register for every other tenant on the cluster.
+func errReservedDatabase(database string) error {
+	return fmt.Errorf("database %q is reserved for the operator's own ownership register", database)
+}
+
+// ensureOwnerRegister creates the operator's own schema and register table.
+//
+// Idempotent and cheap, and run before the first read rather than only before a
+// write: a fresh cluster has no register at all, and a read that treated
+// "schema missing" as an error would fail every first reconcile.
+func (m MySQL) ensureOwnerRegister(ctx context.Context, db *sql.DB) error {
+	if _, err := db.ExecContext(ctx, fmt.Sprintf(
+		"CREATE DATABASE IF NOT EXISTS %s CHARACTER SET utf8mb4", quoteMySQLIdentifier(ownerSchema)),
+	); err != nil {
+		return fmt.Errorf("create owner register schema: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE TABLE IF NOT EXISTS %s.%s (
+			database_name VARCHAR(64) NOT NULL PRIMARY KEY,
 			owner VARCHAR(512) NOT NULL
-		) ENGINE=InnoDB`, quoteMySQLIdentifier(ownerMarkerTable)),
+		) ENGINE=InnoDB`,
+		quoteMySQLIdentifier(ownerSchema), quoteMySQLIdentifier(ownerTable)),
 	); err != nil {
-		return fmt.Errorf("create owner marker table in %q: %w", database, err)
-	}
-
-	// A single row, upserted. The fixed primary key is what makes it single —
-	// without it a reconcile loop would append a row per pass.
-	if _, err := conn.ExecContext(ctx, fmt.Sprintf(
-		"INSERT INTO %s (id, owner) VALUES (1, ?) ON DUPLICATE KEY UPDATE owner = VALUES(owner)",
-		quoteMySQLIdentifier(ownerMarkerTable)), owner,
-	); err != nil {
-		return fmt.Errorf("record owner in %q: %w", database, err)
+		return fmt.Errorf("create owner register table: %w", err)
 	}
 	return nil
 }
 
-// databaseOwnerMarker reads the owner recorded inside a database, or "" when
-// there is no marker — meaning it was created outside the operator.
-func (m MySQL) databaseOwnerMarker(ctx context.Context, db *sql.DB, database string) (string, error) {
-	// Checked via information_schema rather than by querying the table and
-	// treating the error as absence. "Table doesn't exist" and "you cannot read
-	// it" are different answers, and only the first one means unmarked.
-	var count int
-	if err := db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM information_schema.tables
-		  WHERE table_schema = ? AND table_name = ?`,
-		database, ownerMarkerTable,
-	).Scan(&count); err != nil {
-		return "", fmt.Errorf("look for owner marker in %q: %w", database, err)
+// writeOwnerMarker records ownership of a database in the operator's register.
+//
+// Runs on the ADMIN connection, so no second connection to the tenant database
+// is needed — and, more to the point, the tenant has no grant that reaches this
+// row. Keyed by database name and upserted, so a reconcile is a no-op.
+func (m MySQL) writeOwnerMarker(ctx context.Context, db *sql.DB, database, owner string) error {
+	if _, err := db.ExecContext(ctx, fmt.Sprintf(
+		"INSERT INTO %s.%s (database_name, owner) VALUES (?, ?) ON DUPLICATE KEY UPDATE owner = VALUES(owner)",
+		quoteMySQLIdentifier(ownerSchema), quoteMySQLIdentifier(ownerTable)), database, owner,
+	); err != nil {
+		return fmt.Errorf("record owner of %q: %w", database, err)
 	}
-	if count == 0 {
-		return "", nil
-	}
+	return nil
+}
 
+// deleteOwnerMarker removes a database's row from the register.
+//
+// Called from Drop, and it must be: the register outlives the database, so a
+// row left behind would make a later request for the same name look like
+// someone else's database rather than a free one.
+func (m MySQL) deleteOwnerMarker(ctx context.Context, db *sql.DB, database string) error {
+	if _, err := db.ExecContext(ctx, fmt.Sprintf(
+		"DELETE FROM %s.%s WHERE database_name = ?",
+		quoteMySQLIdentifier(ownerSchema), quoteMySQLIdentifier(ownerTable)), database,
+	); err != nil {
+		return fmt.Errorf("clear owner record for %q: %w", database, err)
+	}
+	return nil
+}
+
+// databaseOwnerMarker reads the owner recorded for a database, or "" when the
+// register has no row — meaning the operator did not create it.
+func (m MySQL) databaseOwnerMarker(ctx context.Context, db *sql.DB, database string) (string, error) {
 	var owner string
 	err := db.QueryRowContext(ctx, fmt.Sprintf(
-		"SELECT owner FROM %s.%s WHERE id = 1",
-		quoteMySQLIdentifier(database), quoteMySQLIdentifier(ownerMarkerTable)),
+		"SELECT owner FROM %s.%s WHERE database_name = ?",
+		quoteMySQLIdentifier(ownerSchema), quoteMySQLIdentifier(ownerTable)), database,
 	).Scan(&owner)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
 	if err != nil {
-		return "", fmt.Errorf("read owner marker in %q: %w", database, err)
+		return "", fmt.Errorf("read owner record for %q: %w", database, err)
 	}
 	return owner, nil
 }
@@ -514,9 +580,25 @@ func ownerAttributeJSON(owner string) string {
 	return string(b)
 }
 
+// mysqlURI assembles the convenience connection string published in the Secret.
+//
+// ⚠️ There is no standard MySQL URI, and the `tls` parameter below is
+// specifically go-sql-driver/mysql's spelling. Connector/J calls it `sslMode`,
+// Connector/Python takes `ssl_*` connection arguments and no URI parameter at
+// all, and PHP's mysqli does not accept a URI in the first place. A non-Go
+// consumer that pastes this string will therefore ignore the TLS instruction —
+// and against a Percona cluster, which requires TLS, that fails to connect.
+//
+// The URI is a convenience, not the contract. The Secret also carries `host`,
+// `port`, `database`, `username` and `password` as discrete keys, and those are
+// what a non-Go consumer should use, configuring TLS in whatever way its own
+// client spells it. Documented in the README next to the Secret contract.
+//
+// Kept rather than stripped: dropping the parameter would silently downgrade Go
+// consumers, who are the ones actually able to use the string, to a plaintext
+// attempt against a TLS-required server. Better to be right for the audience it
+// serves and explicit about who that is.
 func mysqlURI(t Target, database, user, password string) string {
-	// The scheme MySQL clients and most ORMs expect. Distinct from the Go
-	// driver's own DSN, which is not a URL — consumers get the portable form.
 	u := url.URL{
 		Scheme: "mysql",
 		User:   url.UserPassword(user, password),

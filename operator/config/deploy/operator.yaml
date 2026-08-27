@@ -131,10 +131,15 @@ spec:
             - name: MIMIR_POSTGRES_POOLER_AUTH_ROLE
               value: _crunchypgbouncer
 
-            - name: MIMIR_MYSQL_HOST
-              value: mimir-mysql-haproxy.mimir.svc
-            - name: MIMIR_MYSQL_PORT
-              value: "3306"
+            # MySQL is wired but NOT enabled — see shared/kustomization.yaml,
+            # where the cluster itself is commented out for the same reason.
+            # Uncomment both together. With HOST unset the engine reports
+            # ClusterNotFound, which is a clearer answer than pointing at a
+            # Service that does not exist and failing to connect.
+            # - name: MIMIR_MYSQL_HOST
+            #   value: mimir-mysql-haproxy.mimir.svc
+            # - name: MIMIR_MYSQL_PORT
+            #   value: "3306"
             # No ADMIN_HOST override: unlike Postgres, MySQL DDL is not
             # transactional, so HAProxy in front of the primary carries
             # CREATE DATABASE perfectly well and admin traffic can share the
@@ -144,15 +149,15 @@ spec:
             # monitor, xtrabackup — with passwords as the values, so there is
             # no `user` key to read. The admin account is therefore given
             # literally, and the password key defaults to "root" to match.
-            - name: MIMIR_MYSQL_ADMIN_SECRET
-              value: mimir/mimir-mysql-secrets
-            - name: MIMIR_MYSQL_ADMIN_USER
-              value: root
-            - name: MIMIR_MYSQL_ADMIN_DATABASE
-              value: mysql
+            # - name: MIMIR_MYSQL_ADMIN_SECRET
+            #   value: mimir/mimir-mysql-secrets
+            # - name: MIMIR_MYSQL_ADMIN_USER
+            #   value: root
+            # - name: MIMIR_MYSQL_ADMIN_DATABASE
+            #   value: mysql
             # PXC serves TLS by default.
-            - name: MIMIR_MYSQL_TLS
-              value: "true"
+            # - name: MIMIR_MYSQL_TLS
+            #   value: "true"
           # Requests present from the start. An operator with a health probe
           # and no request is the restart loop this platform keeps rediscovering.
           resources:

@@ -7,4 +7,19 @@ kind: Kustomization
 
 resources:
   - postgres-cluster.yaml
-  - mysql-cluster.yaml
+  # mysql-cluster.yaml is deliberately NOT listed yet.
+  #
+  # This path is synced by the mimir-shared-clusters ArgoCD Application, so
+  # adding the line deploys the cluster to the real platform on merge — and it
+  # is a SINGLE PXC node with allowUnsafeConfigurations, meaning no Galera
+  # quorum and no failover for every MySQL tenant that would then land on it.
+  #
+  # The provisioner it belongs to is merging first so it can be exercised
+  # against the published image; nothing requests MySQL until this line and the
+  # matching MIMIR_MYSQL_* block in operator/config/deploy/operator.yaml are
+  # both uncommented. Until then `DataService{engine: mysql}` reports
+  # ClusterNotFound, which is the designed answer for an unconfigured engine.
+  #
+  # Enable both together once the cluster is either multi-node or knowingly
+  # accepted as single-node for its first tenants.
+  # - mysql-cluster.yaml

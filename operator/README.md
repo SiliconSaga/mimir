@@ -24,6 +24,8 @@ forgejo   postgres   shared     forgejo   forgejo-dataservice  Ready  30s
 
 The Secret carries `host`, `port`, `database`, `username`, `password` and a ready-assembled `uri`. Its name is reported in `status.secretName`, so consumers never guess — the same contract Strimzi's `KafkaUser` uses.
 
+⚠️ **For MySQL, `uri` targets Go consumers specifically.** There is no standard MySQL URI. The `tls` parameter is `go-sql-driver/mysql`'s spelling; Connector/J calls it `sslMode`, Connector/Python takes `ssl_*` connection arguments and no URI parameter, and PHP's `mysqli` accepts no URI at all. A non-Go consumer that pastes the string will silently ignore the TLS instruction and then fail to connect to the TLS-required cluster. **Use the discrete keys** and configure TLS however your own client spells it — the URI is a convenience, not the contract.
+
 ## Why this exists
 
 Every Mimir claim before this one provisioned a whole cluster: roughly four pods per consuming app, regardless of use. Three Postgres consumers meant three clusters and about twelve pods, for databases measuring 60–77m CPU at p95.

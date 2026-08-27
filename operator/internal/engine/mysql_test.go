@@ -85,10 +85,20 @@ func TestMySQLUserNameDistinguishesLongNames(t *testing.T) {
 	}
 }
 
-func TestMySQLUserNameIsDeterministic(t *testing.T) {
+// TestMySQLUserNameIsStable pins the derivation to a literal value.
+//
+// Comparing mysqlUserName(in) against itself, as this first did, asserts
+// nothing — both sides move together, so a changed truncation length or hash
+// would pass — and staticcheck rejects it as SA4000 besides. The account name
+// has to be stable across releases, not merely stable within one call: it is
+// the identity a live tenant authenticates as, so a change silently locks every
+// long-named tenant out until someone notices.
+func TestMySQLUserNameIsStable(t *testing.T) {
 	in := strings.Repeat("c", 63)
-	if mysqlUserName(in) != mysqlUserName(in) {
-		t.Error("mysqlUserName is not deterministic; the account would move between reconciles")
+	const want = "ccccccccccccccccccccccc_93378fde"
+
+	if got := mysqlUserName(in); got != want {
+		t.Errorf("mysqlUserName(%q) = %q, want %q — changing the derivation orphans existing accounts", in, got, want)
 	}
 }
 

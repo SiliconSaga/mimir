@@ -441,6 +441,170 @@ func TestMySQLDropRefusesForeignDatabase(t *testing.T) {
 	}
 }
 
+// TestMySQLTenantCannotTamperWithOwnership is why the ownership register lives
+// in the operator's own schema rather than inside the tenant's database.
+//
+// `GRANT ALL PRIVILEGES ON <db>.*` reaches every table in that database. With
+// the marker stored there, a tenant could rewrite it — and the damaging
+// direction is not the obvious one: pointing it elsewhere makes Drop return nil
+// without deleting, so removing the DataService would leave the database and
+// its data behind, orphaned.
+func TestMySQLTenantCannotTamperWithOwnership(t *testing.T) {
+	tgt := testMySQLTarget(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	m := MySQL{}
+	dbName := testMySQLDB(t, "tamper")
+	owner := "ns/app/uid-1"
+
+	creds, err := m.Ensure(ctx, tgt, dbName, "", Options{Owner: owner})
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	cleanupMySQL(t, tgt, dbName)
+
+	// As the TENANT, try to reach the register at all.
+	tenant, err := openMySQL(tgt, creds.Username, creds.Password, dbName)
+	if err != nil {
+		t.Fatalf("tenant connection: %v", err)
+	}
+	defer func() { _ = tenant.Close() }()
+
+	_, err = tenant.ExecContext(ctx, fmt.Sprintf(
+		"UPDATE %s.%s SET owner = 'ns/impostor/uid-9' WHERE database_name = ?",
+		quoteMySQLIdentifier(ownerSchema), quoteMySQLIdentifier(ownerTable)), dbName)
+	if err == nil {
+		t.Fatal("the tenant rewrote its own ownership record; the register is reachable from the tenant's grant")
+	}
+	if !isAccessDenied(err) {
+		t.Fatalf("expected an access-denied error reaching the register, got: %v", err)
+	}
+
+	// Belt and braces: the register still says what it should, and Drop still
+	// removes the database.
+	admin, err := openMySQLAdmin(tgt)
+	if err != nil {
+		t.Fatalf("admin connection: %v", err)
+	}
+	defer func() { _ = admin.Close() }()
+
+	got, err := m.databaseOwnerMarker(ctx, admin, dbName)
+	if err != nil {
+		t.Fatalf("reading the register: %v", err)
+	}
+	if got != owner {
+		t.Errorf("owner record = %q, want %q", got, owner)
+	}
+}
+
+// TestMySQLRefusesTheOperatorsOwnSchema — ValidateIdentifier accepts
+// "mimir_dataservice", and a DataService in namespace `mimir` named
+// `dataservice` derives exactly that. Provisioning it would hand that tenant
+// GRANT ALL over every other tenant's ownership record.
+func TestMySQLRefusesTheOperatorsOwnSchema(t *testing.T) {
+	tgt := testMySQLTarget(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	m := MySQL{}
+	if _, err := m.Ensure(ctx, tgt, ownerSchema, "", Options{Owner: "ns/app/uid-1"}); err == nil {
+		t.Fatal("Ensure provisioned the operator's own register schema as a tenant database")
+	}
+	if err := m.Drop(ctx, tgt, ownerSchema, "ns/app/uid-1"); err == nil {
+		t.Fatal("Drop accepted the operator's own register schema")
+	}
+}
+
+// TestMySQLStaleOwnerRecordIsReclaimable — moving the register out of the
+// tenant database means it can outlive a hand-dropped database. A record with
+// nothing behind it must not strand the name forever.
+func TestMySQLStaleOwnerRecordIsReclaimable(t *testing.T) {
+	tgt := testMySQLTarget(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	m := MySQL{}
+	dbName := testMySQLDB(t, "stale")
+
+	if _, err := m.Ensure(ctx, tgt, dbName, "", Options{Owner: "ns/first/uid-1"}); err != nil {
+		t.Fatalf("first Ensure: %v", err)
+	}
+
+	// Remove the database AND its account behind the operator's back, leaving
+	// only the register row — a hand cleanup that missed the register.
+	//
+	// The account has to go too. A surviving account is refused separately, and
+	// deliberately: adopting one by name would inherit whatever it already
+	// holds, which is the privilege-escalation-in-a-Secret the marker exists to
+	// prevent. TestMySQLOwnershipConflictOnUserNamesTheDatabase covers that
+	// case; this one is about the register row alone.
+	admin, err := openMySQLAdmin(tgt)
+	if err != nil {
+		t.Fatalf("admin connection: %v", err)
+	}
+	defer func() { _ = admin.Close() }()
+	if _, err := admin.ExecContext(ctx,
+		fmt.Sprintf("DROP DATABASE IF EXISTS %s", quoteMySQLIdentifier(dbName))); err != nil {
+		t.Fatalf("dropping the database by hand: %v", err)
+	}
+	if _, err := admin.ExecContext(ctx, fmt.Sprintf("DROP USER IF EXISTS %s@%s",
+		quoteMySQLLiteral(mysqlUserName(dbName)), quoteMySQLLiteral("%"))); err != nil {
+		t.Fatalf("dropping the account by hand: %v", err)
+	}
+
+	// A different owner may now claim the name: there is no data to protect.
+	creds, err := m.Ensure(ctx, tgt, dbName, "", Options{Owner: "ns/second/uid-2"})
+	if err != nil {
+		t.Fatalf("reclaiming a name whose database is gone: %v", err)
+	}
+	cleanupMySQL(t, tgt, dbName)
+
+	if err := queryAs(ctx, tgt, creds.Username, creds.Password, dbName); err != nil {
+		t.Fatalf("reclaimed credentials do not work: %v", err)
+	}
+	got, err := m.databaseOwnerMarker(ctx, admin, dbName)
+	if err != nil {
+		t.Fatalf("reading the register: %v", err)
+	}
+	if got != "ns/second/uid-2" {
+		t.Errorf("owner record = %q, want the reclaiming owner", got)
+	}
+}
+
+// TestMySQLDropClearsTheOwnerRecord — the register outlives the database, so a
+// row left behind would make the name look permanently taken.
+func TestMySQLDropClearsTheOwnerRecord(t *testing.T) {
+	tgt := testMySQLTarget(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	m := MySQL{}
+	dbName := testMySQLDB(t, "cleared")
+	owner := "ns/app/uid-1"
+
+	if _, err := m.Ensure(ctx, tgt, dbName, "", Options{Owner: owner}); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if err := m.Drop(ctx, tgt, dbName, owner); err != nil {
+		t.Fatalf("Drop: %v", err)
+	}
+
+	admin, err := openMySQLAdmin(tgt)
+	if err != nil {
+		t.Fatalf("admin connection: %v", err)
+	}
+	defer func() { _ = admin.Close() }()
+
+	got, err := m.databaseOwnerMarker(ctx, admin, dbName)
+	if err != nil {
+		t.Fatalf("reading the register: %v", err)
+	}
+	if got != "" {
+		t.Errorf("owner record survived Drop as %q; the name would look taken forever", got)
+	}
+}
+
 // TestMySQLDropThenReprovision — deleting a DataService and declaring it again
 // must work, which means Drop has to leave nothing behind that Ensure trips on.
 func TestMySQLDropThenReprovision(t *testing.T) {
