@@ -37,4 +37,23 @@ fi
 "$GO" vet ./...
 "$GO" vet -tags integration ./...
 
-echo "ok: gofmt clean, go vet clean (both build tags)"
+# staticcheck on top of vet, for the class of defect this component keeps
+# producing: an assertion that cannot fail.
+#
+# A test here compared a derived name against itself — necessarily equal, so it
+# asserted nothing — and it took a human reading the diff to notice. `go vet` is
+# silent on that shape; staticcheck reports it as SA4000. Confirmed both ways
+# before adding this, rather than assumed.
+#
+# It cannot catch the semantic version of the same mistake — "this counter can
+# actually move", "this refusal is for the right reason" — which is why the
+# integration tests carry explicit negative controls. This closes the half a
+# machine can see.
+#
+# Pinned rather than @latest so a new release cannot fail the build on a day
+# nobody changed the code. `go run` caches the module after the first fetch.
+STATICCHECK="honnef.co/go/tools/cmd/staticcheck@2025.1.1"
+"$GO" run "$STATICCHECK" ./...
+"$GO" run "$STATICCHECK" -tags integration ./...
+
+echo "ok: gofmt clean, go vet + staticcheck clean (both build tags)"
