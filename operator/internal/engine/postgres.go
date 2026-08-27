@@ -752,9 +752,15 @@ func (Postgres) connect(ctx context.Context, t Target, database string) (*pgx.Co
 		// encrypted; the identity check is a hardening follow-up.
 		sslmode = "require"
 	}
-	dsn := fmt.Sprintf("postgres://%s:%s@%s/%s?sslmode=%s",
+	// connect_timeout for the same reason the MySQL engine sets its three: the
+	// driver waits forever by default and Reconcile carries no deadline, so an
+	// unreachable server holds a worker rather than failing and requeueing.
+	// Flagged on the MySQL side in review and fixed here too — the exposure was
+	// never engine-specific, it was just found there first.
+	dsn := fmt.Sprintf("postgres://%s:%s@%s/%s?sslmode=%s&connect_timeout=%d",
 		url.QueryEscape(t.AdminUser), url.QueryEscape(t.AdminPassword),
-		hostPort(t.AdminHost, t.AdminPort), url.PathEscape(database), sslmode)
+		hostPort(t.AdminHost, t.AdminPort), url.PathEscape(database), sslmode,
+		int(dialTimeout.Seconds()))
 
 	conn, err := pgx.Connect(ctx, dsn)
 	if err != nil {

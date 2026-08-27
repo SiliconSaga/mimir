@@ -444,28 +444,30 @@ func (m MySQL) databaseOwnerMarker(ctx context.Context, db *sql.DB, database str
 // closest thing MySQL has to COMMENT ON ROLE, and it has the property that
 // matters: it lives on the account, so it cannot drift and it vanishes with it.
 func (m MySQL) userOwnerMarker(ctx context.Context, db *sql.DB, user string) (string, error) {
-	var attrs sql.NullString
+	// One query, not two. An earlier form read ATTRIBUTE first only to test
+	// whether it was null or empty, which JSON_UNQUOTE(JSON_EXTRACT(...))
+	// already answers with NULL — and the pair disagreed about a missing
+	// account: the first read mapped ErrNoRows to "unmarked", the second
+	// returned an error, so an account dropped between the two turned a
+	// recoverable "not ours" into a failed reconcile.
+	//
+	// The path is built from ownerAttributeKey rather than written out. A
+	// literal '$.mimirOwner' here would keep reading the old key if the
+	// constant ever changed, and the failure is silent and total: the marker
+	// never matches, so every owned tenant reports ErrNotOwned at once.
+	//
+	// JSON_EXTRACT rather than parsing here, so the key and the escaping stay
+	// owned by the same engine that wrote them.
+	var owner sql.NullString
 	err := db.QueryRowContext(ctx,
-		`SELECT ATTRIBUTE FROM information_schema.user_attributes
-		  WHERE USER = ? AND HOST = '%'`, user,
-	).Scan(&attrs)
+		`SELECT JSON_UNQUOTE(JSON_EXTRACT(ATTRIBUTE, ?))
+		   FROM information_schema.user_attributes WHERE USER = ? AND HOST = '%'`,
+		"$."+ownerAttributeKey, user,
+	).Scan(&owner)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
 	if err != nil {
-		return "", fmt.Errorf("read owner attribute on user %q: %w", user, err)
-	}
-	if !attrs.Valid || attrs.String == "" {
-		return "", nil
-	}
-
-	// Read back with JSON_EXTRACT rather than parsing here, so the key and the
-	// escaping stay owned by the same engine that wrote them.
-	var owner sql.NullString
-	if err := db.QueryRowContext(ctx,
-		`SELECT JSON_UNQUOTE(JSON_EXTRACT(ATTRIBUTE, '$.mimirOwner'))
-		   FROM information_schema.user_attributes WHERE USER = ? AND HOST = '%'`, user,
-	).Scan(&owner); err != nil {
 		return "", fmt.Errorf("read owner attribute on user %q: %w", user, err)
 	}
 	if !owner.Valid {
@@ -506,6 +508,15 @@ func (MySQL) connect(ctx context.Context, t Target, database string) (*sql.DB, e
 	cfg.Passwd = t.AdminPassword
 	cfg.Net = "tcp"
 	cfg.Addr = hostPort(t.AdminHost, t.AdminPort)
+	// The driver leaves all three at zero, meaning "wait forever", and
+	// controller-runtime gives Reconcile no deadline by default — so an
+	// unresponsive server holds a reconcile worker indefinitely rather than
+	// failing and being requeued. There are only a handful of workers, so a
+	// wedged server takes the whole controller down with it, for every engine
+	// and every tenant, and the operator looks hung rather than degraded.
+	cfg.Timeout = dialTimeout
+	cfg.ReadTimeout = ioTimeout
+	cfg.WriteTimeout = ioTimeout
 	cfg.DBName = database
 	// Interpolation off: placeholders go to the server as placeholders, which
 	// is what keeps the parameterised queries above genuinely parameterised.
