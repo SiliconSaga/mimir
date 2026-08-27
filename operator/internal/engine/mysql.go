@@ -185,14 +185,13 @@ func (m MySQL) Ensure(ctx context.Context, t Target, database, current string, o
 		); err != nil {
 			return creds, fmt.Errorf("set password for user %q: %w", user, err)
 		}
-		if opts.Owner != "" {
-			if _, err := db.ExecContext(ctx, fmt.Sprintf("ALTER USER %s@%s ATTRIBUTE %s",
-				quoteMySQLLiteral(user), quoteMySQLLiteral("%"),
-				quoteMySQLLiteral(ownerAttributeJSON(opts.Owner))),
-			); err != nil {
-				return creds, fmt.Errorf("record owner on user %q: %w", user, err)
-			}
-		}
+		// No ATTRIBUTE write here. Reaching this line with a non-empty
+		// opts.Owner means the ownership check above already read the account's
+		// marker and found it equal — that check returns a conflict otherwise —
+		// so the write could only ever store the value already present. On
+		// Galera that is not free: ALTER USER is DDL, replicated under Total
+		// Order Isolation, so it buys a cluster-wide stall per tenant per
+		// reconcile in exchange for nothing.
 	}
 
 	if !dbExists {
@@ -351,10 +350,29 @@ func errReservedDatabase(database string) error {
 
 // ensureOwnerRegister creates the operator's own schema and register table.
 //
-// Idempotent and cheap, and run before the first read rather than only before a
-// write: a fresh cluster has no register at all, and a read that treated
-// "schema missing" as an error would fail every first reconcile.
+// Run before the first read rather than only before a write: a fresh cluster
+// has no register at all, and a read that treated "schema missing" as an error
+// would fail every first reconcile.
+//
+// Idempotent, but NOT cheap enough to run blind. `CREATE ... IF NOT EXISTS` is
+// still DDL, and on Galera DDL replicates under Total Order Isolation — a
+// cluster-wide stall rather than a local no-op. Two of them per tenant per
+// reconcile, forever, to create something that exists after the first pass. The
+// existence check below is a local catalog read, so the steady state costs a
+// query instead.
 func (m MySQL) ensureOwnerRegister(ctx context.Context, db *sql.DB) error {
+	var present int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM information_schema.tables
+		  WHERE table_schema = ? AND table_name = ?`,
+		ownerSchema, ownerTable,
+	).Scan(&present); err != nil {
+		return fmt.Errorf("look for the owner register: %w", err)
+	}
+	if present > 0 {
+		return nil
+	}
+
 	if _, err := db.ExecContext(ctx, fmt.Sprintf(
 		"CREATE DATABASE IF NOT EXISTS %s CHARACTER SET utf8mb4", quoteMySQLIdentifier(ownerSchema)),
 	); err != nil {

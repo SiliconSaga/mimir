@@ -30,6 +30,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -664,4 +665,197 @@ func TestMySQLLongDatabaseNameProvisions(t *testing.T) {
 	if err := queryAs(ctx, tgt, creds.Username, creds.Password, dbName); err != nil {
 		t.Fatalf("credentials for a long-named database do not work: %v", err)
 	}
+}
+
+// mustAdminDB opens an admin connection for a test's own catalog checks.
+func mustAdminDB(t *testing.T, tgt Target) *sql.DB {
+	t.Helper()
+	db, err := openMySQLAdmin(tgt)
+	if err != nil {
+		t.Fatalf("admin connect: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
+
+// openMySQLURI connects using ONLY the published uri, the way a consumer that
+// was handed one would.
+//
+// Every other helper here reassembles the connection from host, port, username,
+// password and database — which is exactly how a broken `uri` stays invisible.
+// On the Postgres side the published URI pointed at a pooler that could not
+// authenticate anyone, and that went unnoticed for weeks precisely because no
+// test ever used the field: the tests rebuilt the connection and passed.
+//
+// The Go driver takes a DSN rather than a URL, so the URI is parsed back into
+// one. That is what a consumer's library does too, and it exercises the parts
+// that can actually be wrong: the scheme, credential escaping, the host and
+// port (including IPv6 brackets), the database in the path, and the TLS
+// parameter.
+func openMySQLURI(uri string) (*sql.DB, error) {
+	u, err := url.Parse(uri)
+	if err != nil {
+		return nil, fmt.Errorf("published uri does not parse: %w", err)
+	}
+	if u.Scheme != "mysql" {
+		return nil, fmt.Errorf("published uri has scheme %q, want mysql", u.Scheme)
+	}
+	if u.User == nil {
+		return nil, errors.New("published uri carries no credentials")
+	}
+	password, ok := u.User.Password()
+	if !ok {
+		return nil, errors.New("published uri carries no password")
+	}
+
+	cfg := mysql.NewConfig()
+	cfg.User = u.User.Username()
+	cfg.Passwd = password
+	cfg.Net = "tcp"
+	cfg.Addr = u.Host
+	cfg.DBName = strings.TrimPrefix(u.Path, "/")
+	if tls := u.Query().Get("tls"); tls != "" {
+		cfg.TLSConfig = tls
+	}
+	return sql.Open("mysql", cfg.FormatDSN())
+}
+
+// TestMySQLPublishedURIConnects is the contract consumers are actually handed.
+//
+// `uri` is a field in the Secret that apps paste into their own configuration,
+// so it has to work verbatim rather than only after being taken apart and put
+// back together. Asserting it against the database it names also catches a URI
+// that connects to the right server but the wrong — or no — database, which a
+// bare "did it connect" check would not.
+//
+// The uri is documented as targeting Go consumers, since `tls=` is
+// go-sql-driver's spelling. That is a reason to test it with a Go client, not a
+// reason to leave the field untested: an app is told this string works.
+func TestMySQLPublishedURIConnects(t *testing.T) {
+	tgt := testMySQLTarget(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	m := MySQL{}
+	dbName := testMySQLDB(t, "uri_probe")
+	cleanupMySQL(t, tgt, dbName)
+
+	creds, err := m.Ensure(ctx, tgt, dbName, "", Options{Owner: "ns/uri/uid-1"})
+	if err != nil {
+		t.Fatalf("provisioning: %v", err)
+	}
+
+	db, err := openMySQLURI(creds.URI)
+	if err != nil {
+		t.Fatalf("the published uri is not usable: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	// NullString rather than string: a uri that names no database at all
+	// connects fine and returns NULL here, and scanning that into a string
+	// fails with a driver-level type error that says nothing about the actual
+	// problem.
+	var got sql.NullString
+	if err := db.QueryRowContext(ctx, "SELECT DATABASE()").Scan(&got); err != nil {
+		t.Fatalf("connecting with the published uri: %v", err)
+	}
+	if !got.Valid {
+		t.Fatalf("the published uri connects but selects no database — %q carries no database in its path", creds.URI)
+	}
+	if got.String != dbName {
+		t.Errorf("the published uri lands on database %q, want %q", got.String, dbName)
+	}
+
+	// And it must carry real write access, not merely connect. GRANT ALL is
+	// part of the contract, so a uri that authenticates into a database the
+	// tenant cannot use is still a broken uri.
+	if _, err := db.ExecContext(ctx, "CREATE TABLE canary (v INT)"); err != nil {
+		t.Fatalf("the published uri connects but cannot create a table: %v", err)
+	}
+}
+
+// TestMySQLSteadyStateReconcileDDLBudget holds this file's opening claim to
+// account.
+//
+// mysql.go opens by noting that on Galera every DDL statement replicates under
+// Total Order Isolation — a cluster-wide stall rather than a local write — and
+// that this "is a reason to keep the reconcile's steady state genuinely no-op
+// rather than re-running harmless-looking DDL on a timer". Whether it does is
+// measurable, and was not being measured.
+//
+// The budget is exact rather than an upper bound, so adding a statement to the
+// steady path fails here and has to be argued for.
+//
+// Counted with MySQL's own per-statement counters rather than the general log,
+// so the assertion is about what the server executed rather than about parsing.
+func TestMySQLSteadyStateReconcileDDLBudget(t *testing.T) {
+	tgt := testMySQLTarget(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	m := MySQL{}
+	const owner = "ns/steady/uid-1"
+	dbName := testMySQLDB(t, "steady")
+	cleanupMySQL(t, tgt, dbName)
+
+	creds, err := m.Ensure(ctx, tgt, dbName, "", Options{Owner: owner})
+	if err != nil {
+		t.Fatalf("provisioning: %v", err)
+	}
+
+	admin := mustAdminDB(t, tgt)
+	budget := map[string]int64{
+		// Drift correction that cannot be cheaply confirmed unnecessary: a
+		// stored password hash cannot be compared, and a grant row's presence
+		// does not prove no privilege inside it was revoked.
+		"statement/sql/alter_user": 1,
+		"statement/sql/grant":      1,
+		// Everything else should be reads. A reconcile that re-creates or
+		// re-writes state it just read is paying a cluster-wide stall per
+		// tenant, every pass, for nothing.
+		"statement/sql/create_table": 0,
+		"statement/sql/create_db":    0,
+		"statement/sql/insert":       0,
+		"statement/sql/update":       0,
+	}
+	names := make([]string, 0, len(budget))
+	for name := range budget {
+		names = append(names, name)
+	}
+	before := readStatementCounters(ctx, t, admin, names)
+
+	// A reconcile that changes nothing.
+	if _, err := m.Ensure(ctx, tgt, dbName, creds.Password, Options{Owner: owner}); err != nil {
+		t.Fatalf("steady-state reconcile: %v", err)
+	}
+	after := readStatementCounters(ctx, t, admin, names)
+
+	for name, want := range budget {
+		if delta := after[name] - before[name]; delta != want {
+			t.Errorf("steady-state reconcile issued %d %s, want %d — each one is a Total Order Isolation event on Galera",
+				delta, name, want)
+		}
+	}
+}
+
+// readStatementCounters snapshots MySQL's per-statement execution counts.
+func readStatementCounters(ctx context.Context, t *testing.T, db *sql.DB, names []string) map[string]int64 {
+	t.Helper()
+	out := make(map[string]int64, len(names))
+	for _, name := range names {
+		var value int64
+		// The per-statement summary rather than SHOW GLOBAL STATUS: SHOW takes
+		// no placeholders, and concatenating the name into the statement to
+		// work around that is the habit worth not forming. The Com_* status
+		// variables are also not exposed through performance_schema.global_status
+		// on 8.0, so this is the only parameterisable source for them.
+		if err := db.QueryRowContext(ctx,
+			`SELECT COUNT_STAR FROM performance_schema.events_statements_summary_global_by_event_name
+			  WHERE EVENT_NAME = ?`, name,
+		).Scan(&value); err != nil {
+			t.Fatalf("reading statement counter %q: %v", name, err)
+		}
+		out[name] = value
+	}
+	return out
 }
