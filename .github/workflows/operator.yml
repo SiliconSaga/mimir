@@ -74,6 +74,18 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      # staticcheck catches the shape vet does not: an expression that cannot be
+      # false. A test here compared a derived name against itself and asserted
+      # nothing, and a human found it by reading the diff — SA4000 reports it.
+      #
+      # Run over BOTH build tags. The integration tests are where the
+      # assertions live, and they are exactly the code the default build never
+      # compiles. Pinned so a new release cannot fail a build nobody changed.
+      - name: staticcheck
+        run: |
+          go run honnef.co/go/tools/cmd/staticcheck@2025.1.1 ./...
+          go run honnef.co/go/tools/cmd/staticcheck@2025.1.1 -tags integration ./...
+
       - name: go test
         run: go test ./... -count=1
 
