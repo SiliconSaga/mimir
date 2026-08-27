@@ -548,3 +548,370 @@ func TestDropRemovesEverything(t *testing.T) {
 	}
 	cleanup(t, tgt, dropDB)
 }
+
+// tenantURI is a connection string for an arbitrary credential against a named
+// database, on the ADMIN endpoint — the tests talk to a bare server with no
+// pooler in front, so that is the only endpoint there is.
+func tenantURI(tgt Target, user, password, database string) string {
+	return fmt.Sprintf("postgres://%s:%s@%s/%s?sslmode=disable",
+		user, password,
+		net.JoinHostPort(tgt.AdminHost, strconv.Itoa(int(tgt.AdminPort))), database)
+}
+
+// poolerAuthPassword is fixed because the role is created and thrown away
+// within a single test; nothing outside it ever sees the value.
+const poolerAuthPassword = "poolertestpw"
+
+// createPoolerRole makes a stand-in for _crunchypgbouncer and drops it again.
+//
+// Named per run so two concurrent runs against one server cannot drop each
+// other's role mid-test. The cleanup opens its OWN connection rather than
+// closing over the caller's: t.Cleanup runs after the test function returns,
+// which is after its defers, so a captured connection is already closed by
+// then — and the role would silently survive to collide with a later run.
+func createPoolerRole(t *testing.T, tgt Target) string {
+	t.Helper()
+	role := testDB(t, "pooler_auth")
+
+	exec := func(sql string) error {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		conn, err := pgx.Connect(ctx, adminURI(tgt))
+		if err != nil {
+			return err
+		}
+		defer func() { _ = conn.Close(ctx) }()
+		_, err = conn.Exec(ctx, sql)
+		return err
+	}
+
+	if err := exec(fmt.Sprintf("CREATE ROLE %s WITH LOGIN PASSWORD %s",
+		quoteIdentifier(role), quoteLiteral(poolerAuthPassword))); err != nil {
+		t.Fatalf("create pooler role: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := exec("DROP ROLE IF EXISTS " + quoteIdentifier(role)); err != nil {
+			t.Errorf("cleanup: dropping pooler role %q: %v", role, err)
+		}
+	})
+	return role
+}
+
+// TestPoolerAuthBootstrap covers the reason the published URI works at all.
+//
+// A pooler does not verify passwords itself: it connects as its own role into
+// the database the client named and runs an auth_query there. `REVOKE CONNECT
+// ... FROM PUBLIC` — the revoke that makes the shared cluster multi-tenant —
+// catches that role too, and the lookup function does not exist in a database
+// this operator created. So before ensurePoolerAuth every connection through
+// the pooler was refused, for every tenant, including to its own database.
+//
+// That failure was invisible from outside: pgBouncer reports the failed lookup
+// to the client as `permission denied for database "x"`, character for
+// character what a correctly refused CROSS-tenant attempt produces. The
+// end-to-end isolation assertion therefore passed while nothing worked at all.
+//
+// This test does what pgBouncer does, directly, so it can fail for the right
+// reason rather than an indistinguishable one.
+func TestPoolerAuthBootstrap(t *testing.T) {
+	tgt := testTarget(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	authRole := createPoolerRole(t, tgt)
+	tgt.PoolerAuthRole = authRole
+
+	p := Postgres{}
+	db := testDB(t, "pooled")
+	// Registered BEFORE Ensure, unlike the tests above. Ensure now probes the
+	// lookup and can fail after the database exists and has granted the pooler
+	// role CONNECT — and that grant makes the role undroppable, so a cleanup
+	// registered only on success buries the real failure under a confusing
+	// "cannot be dropped because some objects depend on it".
+	cleanup(t, tgt, db)
+	creds, err := p.Ensure(ctx, tgt, db, "", Options{Owner: "ns/pooled/uid-1"})
+	if err != nil {
+		t.Fatalf("provisioning: %v", err)
+	}
+
+	// What pgBouncer actually does: connect AS the auth role INTO the tenant's
+	// database, then look the tenant's password up there.
+	poolerConn, err := pgx.Connect(ctx, tenantURI(tgt, authRole, poolerAuthPassword, db))
+	if err != nil {
+		t.Fatalf("the pooler role cannot reach %q, so every client through the pooler is refused: %v", db, err)
+	}
+	defer func() { _ = poolerConn.Close(ctx) }()
+
+	var gotUser, gotSecret string
+	if err := poolerConn.QueryRow(ctx,
+		"SELECT username, password FROM pgbouncer.get_auth($1)", creds.Username,
+	).Scan(&gotUser, &gotSecret); err != nil {
+		t.Fatalf("auth_query failed for %q: %v", creds.Username, err)
+	}
+	if gotUser != creds.Username {
+		t.Fatalf("auth_query returned user %q, want %q", gotUser, creds.Username)
+	}
+	if gotSecret == "" {
+		t.Fatal("auth_query returned an empty verifier, so the pooler cannot authenticate anyone")
+	}
+
+	// The tenant must NOT be able to run the lookup themselves. It returns the
+	// password verifier of every login role on the cluster, so a copy of it
+	// reachable inside each tenant's own database would hand every tenant the
+	// credentials of every other one — the opposite of what this operator is
+	// for, delivered by the fix for a connectivity bug.
+	t.Run("tenant cannot read the lookup", func(t *testing.T) {
+		conn, err := pgx.Connect(ctx, tenantURI(tgt, creds.Username, creds.Password, db))
+		if err != nil {
+			t.Fatalf("tenant cannot reach its own database: %v", err)
+		}
+		defer func() { _ = conn.Close(ctx) }()
+
+		var u, s string
+		err = conn.QueryRow(ctx,
+			"SELECT username, password FROM pgbouncer.get_auth($1)", creds.Username).Scan(&u, &s)
+		if err == nil {
+			t.Fatal("PRIVILEGE LEAK: a tenant can read password verifiers through pgbouncer.get_auth")
+		}
+		// Name the object that refused. A bare "permission denied" would also
+		// be produced by a database the tenant cannot even reach, which is the
+		// state before the bootstrap exists — so the generic check would pass
+		// while proving nothing about the grants on this function.
+		msg := strings.ToLower(err.Error())
+		if !strings.Contains(msg, "permission denied for schema") &&
+			!strings.Contains(msg, "permission denied for function") {
+			t.Fatalf("tenant was refused, but not by the grants on the lookup — got %v", err)
+		}
+	})
+
+	// SECURITY DEFINER inside a database the TENANT owns is only safe with the
+	// search_path pinned and the objects owned by the admin role. Without
+	// either, a tenant can shadow pg_catalog or replace the function outright
+	// and have it run with the admin role's rights.
+	t.Run("definer function is hardened", func(t *testing.T) {
+		conn, err := pgx.Connect(ctx, tenantURI(tgt, tgt.AdminUser, tgt.AdminPassword, db))
+		if err != nil {
+			t.Fatalf("admin connect to %q: %v", db, err)
+		}
+		defer func() { _ = conn.Close(ctx) }()
+
+		var schemaOwner, funcOwner string
+		var proconfig []string
+		if err := conn.QueryRow(ctx, `
+			SELECT sn.rolname, fn.rolname, p.proconfig
+			  FROM pg_proc p
+			  JOIN pg_namespace n  ON n.oid = p.pronamespace
+			  JOIN pg_roles     sn ON sn.oid = n.nspowner
+			  JOIN pg_roles     fn ON fn.oid = p.proowner
+			 WHERE n.nspname = 'pgbouncer' AND p.proname = 'get_auth'`,
+		).Scan(&schemaOwner, &funcOwner, &proconfig); err != nil {
+			t.Fatalf("reading pgbouncer.get_auth from the catalog: %v", err)
+		}
+		if schemaOwner != tgt.AdminUser {
+			t.Errorf("pgbouncer schema owned by %q, want %q — a tenant-owned schema can house a hijacked definer function",
+				schemaOwner, tgt.AdminUser)
+		}
+		if funcOwner != tgt.AdminUser {
+			t.Errorf("get_auth owned by %q, want %q", funcOwner, tgt.AdminUser)
+		}
+		if !strings.Contains(strings.Join(proconfig, ","), "search_path=") {
+			t.Errorf("get_auth has no pinned search_path (proconfig=%v) — SECURITY DEFINER in a tenant-owned database without one is a privilege escalation",
+				proconfig)
+		}
+	})
+
+	// Running twice must not trip over the objects created the first time.
+	if _, err := p.Ensure(ctx, tgt, db, creds.Password, Options{Owner: "ns/pooled/uid-1"}); err != nil {
+		t.Fatalf("second Ensure: %v", err)
+	}
+}
+
+// TestPoolerAuthReclaimsATenantOwnedSchema is the case that makes the
+// ownership reassertion worth its lines.
+//
+// The tenant owns the database, so it can create a schema called `pgbouncer`
+// before the operator ever gets there. `CREATE SCHEMA IF NOT EXISTS` would
+// then quietly leave it theirs, and `CREATE OR REPLACE FUNCTION` preserves an
+// existing owner — so a definer function meant to run as the admin role would
+// end up running as the tenant, and the pooler would stop being able to
+// authenticate anyone against that database.
+func TestPoolerAuthReclaimsATenantOwnedSchema(t *testing.T) {
+	tgt := testTarget(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	authRole := createPoolerRole(t, tgt)
+
+	p := Postgres{}
+	db := testDB(t, "squatted")
+
+	// First pass with no pooler configured, so the tenant gets a database with
+	// no pgbouncer schema in it yet.
+	tgt.PoolerAuthRole = ""
+	cleanup(t, tgt, db)
+	creds, err := p.Ensure(ctx, tgt, db, "", Options{Owner: "ns/squatted/uid-1"})
+	if err != nil {
+		t.Fatalf("provisioning: %v", err)
+	}
+
+	// The tenant squats the name, as it is entitled to do in its own database.
+	tenantConn, err := pgx.Connect(ctx, tenantURI(tgt, creds.Username, creds.Password, db))
+	if err != nil {
+		t.Fatalf("tenant connect: %v", err)
+	}
+	if _, err := tenantConn.Exec(ctx, "CREATE SCHEMA pgbouncer"); err != nil {
+		t.Fatalf("tenant creating the pgbouncer schema: %v", err)
+	}
+	// A DIFFERENT return type on purpose, because that is the case the
+	// bootstrap cannot talk its way out of: CREATE OR REPLACE can change a
+	// function's body but not its signature, so this one has to be dropped or
+	// every reconcile from here on fails on the DDL and the DataService never
+	// reaches Ready.
+	if _, err := tenantConn.Exec(ctx, `
+		CREATE FUNCTION pgbouncer.get_auth(p_username TEXT)
+		  RETURNS TEXT
+		  LANGUAGE sql AS $$ SELECT 'nothing'::TEXT $$`,
+	); err != nil {
+		t.Fatalf("tenant creating a decoy get_auth: %v", err)
+	}
+	_ = tenantConn.Close(ctx)
+
+	// Now the pooler is configured and the operator reconciles again.
+	tgt.PoolerAuthRole = authRole
+	if _, err := p.Ensure(ctx, tgt, db, creds.Password, Options{Owner: "ns/squatted/uid-1"}); err != nil {
+		t.Fatalf("reconciling over a tenant-owned pgbouncer schema: %v", err)
+	}
+
+	// The pooler must now be able to authenticate against it, with the real
+	// verifier rather than the tenant's decoy.
+	poolerConn, err := pgx.Connect(ctx, tenantURI(tgt, authRole, poolerAuthPassword, db))
+	if err != nil {
+		t.Fatalf("pooler role cannot reach %q: %v", db, err)
+	}
+	defer func() { _ = poolerConn.Close(ctx) }()
+
+	var gotUser, gotSecret string
+	if err := poolerConn.QueryRow(ctx,
+		"SELECT username, password FROM pgbouncer.get_auth($1)", creds.Username,
+	).Scan(&gotUser, &gotSecret); err != nil {
+		t.Fatalf("auth_query failed after reclaiming the schema: %v", err)
+	}
+	if gotUser != creds.Username || gotSecret == "nothing" {
+		t.Fatalf("auth_query still answering from the tenant's decoy: user=%q secret=%q", gotUser, gotSecret)
+	}
+
+	// The replacement must belong to the admin role. A function left owned by
+	// the tenant runs as the tenant under SECURITY DEFINER, which fails closed
+	// on pg_authid — safe, but it breaks auth for a live service.
+	adminConn, err := pgx.Connect(ctx, tenantURI(tgt, tgt.AdminUser, tgt.AdminPassword, db))
+	if err != nil {
+		t.Fatalf("admin connect to %q: %v", db, err)
+	}
+	defer func() { _ = adminConn.Close(ctx) }()
+
+	var funcOwner string
+	if err := adminConn.QueryRow(ctx, `
+		SELECT p.proowner::regrole::text
+		  FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+		 WHERE n.nspname = 'pgbouncer' AND p.proname = 'get_auth'`,
+	).Scan(&funcOwner); err != nil {
+		t.Fatalf("reading the reclaimed function's owner: %v", err)
+	}
+	if funcOwner != tgt.AdminUser {
+		t.Errorf("reclaimed get_auth owned by %q, want %q", funcOwner, tgt.AdminUser)
+	}
+
+	// Reconciling again must be a no-op rather than another drop-and-create.
+	// This function is on the client login path, so recreating it every pass
+	// would put a window in front of every login.
+	if err := (Postgres{}).ensurePoolerAuth(ctx, adminConn, tgt, db); err != nil {
+		t.Fatalf("second pooler bootstrap over our own function: %v", err)
+	}
+	foreign, err := (Postgres{}).poolerAuthFunctionIsForeign(ctx, adminConn, tgt.AdminUser)
+	if err != nil {
+		t.Fatalf("inspecting the function after reconcile: %v", err)
+	}
+	if foreign {
+		t.Error("our own get_auth is classified as foreign, so every reconcile would drop and recreate it")
+	}
+}
+
+// TestGetAuthResultTypeMatchesTheServer pins the constant used to recognise a
+// function of this name that is not ours.
+//
+// It is a rendering produced by the server, not a string this package
+// controls, so a wording change between PostgreSQL versions would silently
+// make every reconcile classify our own function as foreign — dropping and
+// recreating it on the login path every pass.
+func TestGetAuthResultTypeMatchesTheServer(t *testing.T) {
+	tgt := testTarget(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	authRole := createPoolerRole(t, tgt)
+	tgt.PoolerAuthRole = authRole
+
+	db := testDB(t, "resulttype")
+	cleanup(t, tgt, db)
+	if _, err := (Postgres{}).Ensure(ctx, tgt, db, "", Options{}); err != nil {
+		t.Fatalf("provisioning: %v", err)
+	}
+
+	conn, err := pgx.Connect(ctx, tenantURI(tgt, tgt.AdminUser, tgt.AdminPassword, db))
+	if err != nil {
+		t.Fatalf("admin connect to %q: %v", db, err)
+	}
+	defer func() { _ = conn.Close(ctx) }()
+
+	var result string
+	if err := conn.QueryRow(ctx, `
+		SELECT pg_get_function_result(p.oid)
+		  FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+		 WHERE n.nspname = 'pgbouncer' AND p.proname = 'get_auth'`,
+	).Scan(&result); err != nil {
+		t.Fatalf("reading the function result type: %v", err)
+	}
+	if result != getAuthResultType {
+		t.Errorf("server reports result type %q, but getAuthResultType is %q", result, getAuthResultType)
+	}
+}
+
+// TestPoolerAuthSkippedWhenRoleAbsent keeps this operator usable against a
+// server with no pooler of that shape in front of it — a direct-to-primary
+// deployment, or a different pooler entirely. An absent role is a fact about
+// the deployment, not a failure, and the bootstrap defaults to on.
+func TestPoolerAuthSkippedWhenRoleAbsent(t *testing.T) {
+	tgt := testTarget(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	tgt.PoolerAuthRole = "no_such_pooler_role_here"
+
+	p := Postgres{}
+	db := testDB(t, "unpooled")
+	creds, err := p.Ensure(ctx, tgt, db, "", Options{})
+	if err != nil {
+		t.Fatalf("provisioning against a server with no pooler role: %v", err)
+	}
+	cleanup(t, tgt, db)
+
+	if err := connectAs(ctx, tgt, creds.Username, creds.Password, db); err != nil {
+		t.Fatalf("tenant cannot reach its own database: %v", err)
+	}
+
+	conn, err := pgx.Connect(ctx, tenantURI(tgt, tgt.AdminUser, tgt.AdminPassword, db))
+	if err != nil {
+		t.Fatalf("admin connect to %q: %v", db, err)
+	}
+	defer func() { _ = conn.Close(ctx) }()
+
+	var exists bool
+	if err := conn.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'pgbouncer')`,
+	).Scan(&exists); err != nil {
+		t.Fatalf("checking for the pgbouncer schema: %v", err)
+	}
+	if exists {
+		t.Error("bootstrapped pooler auth for a role that does not exist")
+	}
+}

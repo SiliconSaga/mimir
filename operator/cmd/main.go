@@ -132,6 +132,7 @@ func main() {
 //	MIMIR_POSTGRES_ADMIN_PASSWORD_KEY    default "password"
 //	MIMIR_POSTGRES_ADMIN_DATABASE        default "postgres"
 //	MIMIR_POSTGRES_TLS                   default "true"
+//	MIMIR_POSTGRES_POOLER_AUTH_ROLE      default "_crunchypgbouncer"; "" disables
 func sharedClustersFromEnv() (map[mimirv1alpha1.Engine]controller.SharedCluster, error) {
 	out := map[mimirv1alpha1.Engine]controller.SharedCluster{}
 
@@ -183,6 +184,15 @@ func sharedClustersFromEnv() (map[mimirv1alpha1.Engine]controller.SharedCluster,
 			adminPort = p
 		}
 
+		// Set to the empty string to disable the pooler-auth bootstrap
+		// outright, which is why this reads the variable rather than using
+		// envOr — an explicitly empty value has to be distinguishable from an
+		// absent one.
+		poolerAuthRole := defaultPoolerAuthRole(e)
+		if raw, ok := os.LookupEnv(prefix + "POOLER_AUTH_ROLE"); ok {
+			poolerAuthRole = raw
+		}
+
 		out[e] = controller.SharedCluster{
 			Host:                 host,
 			Port:                 port,
@@ -194,6 +204,7 @@ func sharedClustersFromEnv() (map[mimirv1alpha1.Engine]controller.SharedCluster,
 			AdminPasswordKey:     envOr(prefix+"ADMIN_PASSWORD_KEY", "password"),
 			AdminDatabase:        envOr(prefix+"ADMIN_DATABASE", defaultAdminDatabase(e)),
 			TLS:                  tls,
+			PoolerAuthRole:       poolerAuthRole,
 		}
 	}
 	return out, nil
@@ -229,6 +240,23 @@ func defaultPort(e mimirv1alpha1.Engine) int {
 	default:
 		return 5432
 	}
+}
+
+// defaultPoolerAuthRole is the role a vended database must admit so the pooler
+// can look client passwords up in it.
+//
+// Defaulted rather than left to configuration because getting it wrong is
+// silent: the operator reports Ready and hands out a URI that cannot connect.
+// The default is safe to carry against a server with no such pooler — the
+// bootstrap checks whether the role exists and does nothing when it does not.
+// Only PostgreSQL has one; MySQL and MongoDB are fronted differently.
+func defaultPoolerAuthRole(e mimirv1alpha1.Engine) string {
+	if e == mimirv1alpha1.EnginePostgres {
+		// What Percona's PostgreSQL operator names its pgBouncer identity,
+		// inherited from the Crunchy operator it is built on.
+		return "_crunchypgbouncer"
+	}
+	return ""
 }
 
 func defaultAdminDatabase(e mimirv1alpha1.Engine) string {

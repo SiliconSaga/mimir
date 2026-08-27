@@ -1,3 +1,15 @@
+# databaseName is deliberately NOT set.
+#
+# A literal name is the same physical database on the shared cluster for every
+# run of this test, and the ownership marker then does exactly what it is meant
+# to: a run whose namespace was torn down before the finalizer dropped the
+# database leaves it behind, and every later run is refused as a Conflict —
+# permanently, until someone drops it by hand. Left unset, the operator derives
+# a name from kuttl's randomised namespace, so runs cannot collide and a
+# stranded database from a killed run is inert rather than a landmine.
+#
+# The verification step reads the resulting names out of the published Secrets
+# rather than assuming them.
 apiVersion: mimir.siliconsaga.org/v1alpha1
 kind: DataService
 metadata:
@@ -5,7 +17,6 @@ metadata:
 spec:
   engine: postgres
   placement: shared
-  databaseName: tenant_a
 ---
 apiVersion: mimir.siliconsaga.org/v1alpha1
 kind: DataService
@@ -14,4 +25,3 @@ metadata:
 spec:
   engine: postgres
   placement: shared
-  databaseName: tenant_b

@@ -77,9 +77,15 @@ spec:
           type: RuntimeDefault
       containers:
         - name: manager
-          image: ghcr.io/siliconsaga/mimir-dataservice:0.1.0
-          # Always, because the VERSION tag is deliberately MUTABLE pre-1.0 —
-          # CI republishes 0.1.0 on every change to operator/. The default for
+          # Kept in step with operator/VERSION, the tag CI publishes.
+          #
+          # Bump it for a behaviour change rather than republishing under the
+          # same name. A swapped tag changes what the cluster runs while every
+          # manifest still reads identically, so "is the fix deployed?" stops
+          # being answerable from git at all.
+          image: ghcr.io/siliconsaga/mimir-dataservice:0.2.0
+          # Always, because the VERSION tag stays MUTABLE pre-1.0 — CI
+          # republishes it for changes that do not earn a bump. The default for
           # a non-`latest` tag is IfNotPresent, which trusts whatever already
           # carries that name on the node.
           #
@@ -115,6 +121,15 @@ spec:
             # outright rather than downgraded.
             - name: MIMIR_POSTGRES_TLS
               value: "true"
+            # pgBouncer does not verify passwords itself — it connects as this
+            # role into the database the client asked for and runs an
+            # auth_query there. Vended databases revoke CONNECT from PUBLIC,
+            # which catches this role too, so each one has to admit it
+            # explicitly or NOTHING can connect through MIMIR_POSTGRES_HOST.
+            # Stated here rather than left to the built-in default because the
+            # value is Percona-specific and worth being able to see.
+            - name: MIMIR_POSTGRES_POOLER_AUTH_ROLE
+              value: _crunchypgbouncer
           # Requests present from the start. An operator with a health probe
           # and no request is the restart loop this platform keeps rediscovering.
           resources:
