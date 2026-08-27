@@ -804,19 +804,39 @@ func TestMySQLSteadyStateReconcileDDLBudget(t *testing.T) {
 	}
 
 	admin := mustAdminDB(t, tgt)
+
+	// ⚠️ ONLY non-parameterised statements can be budgeted this way, and that
+	// constraint is not obvious enough to leave implicit.
+	//
+	// These `statement/sql/*` instruments count statements sent as literal text.
+	// Everything this provisioner sends with placeholders — every SELECT, and
+	// the ownership-register INSERT — goes over the prepared-statement protocol
+	// instead and lands in `statement/com/Prepare` / `statement/com/Execute`.
+	// Measured: a first provision that definitely writes an ownership row moves
+	// `statement/sql/insert` by 0 and `statement/com/Execute` by 13.
+	//
+	// So an earlier version of this budget asserted `statement/sql/insert: 0`
+	// and `statement/sql/update: 0`, and both were VACUOUSLY true — they would
+	// have read zero however many rows the reconcile wrote. Removed rather than
+	// corrected, because they were also measuring the wrong thing: the register
+	// write is DML, replicated row-wise, not the Total Order Isolation stall
+	// this budget exists to prevent.
+	//
+	// Do not add a `com/Execute` budget in their place either. Reading these
+	// counters is itself a parameterised query, so the measurement would
+	// perturb what it measures and the expected number would depend on how many
+	// counters the test happens to read.
 	budget := map[string]int64{
 		// Drift correction that cannot be cheaply confirmed unnecessary: a
 		// stored password hash cannot be compared, and a grant row's presence
 		// does not prove no privilege inside it was revoked.
 		"statement/sql/alter_user": 1,
 		"statement/sql/grant":      1,
-		// Everything else should be reads. A reconcile that re-creates or
-		// re-writes state it just read is paying a cluster-wide stall per
-		// tenant, every pass, for nothing.
+		// The DDL that must not recur. A reconcile that re-creates state it
+		// just read pays a cluster-wide stall per tenant, every pass, for
+		// nothing.
 		"statement/sql/create_table": 0,
 		"statement/sql/create_db":    0,
-		"statement/sql/insert":       0,
-		"statement/sql/update":       0,
 	}
 	names := make([]string, 0, len(budget))
 	for name := range budget {
@@ -835,6 +855,38 @@ func TestMySQLSteadyStateReconcileDDLBudget(t *testing.T) {
 			t.Errorf("steady-state reconcile issued %d %s, want %d — each one is a Total Order Isolation event on Galera",
 				delta, name, want)
 		}
+	}
+}
+
+// TestMySQLDDLBudgetCountersAreLive is the negative control for the budget
+// above, and it exists because that budget already shipped two assertions that
+// could never fail.
+//
+// A counter that stays flat proves nothing unless something is known to move
+// it. This provisions a database for the FIRST time — which must issue a
+// CREATE DATABASE — and fails if the harness cannot see it. Without this, a
+// renamed instrument, a disabled performance_schema, or a typo in an event name
+// would turn the whole budget green and silent.
+func TestMySQLDDLBudgetCountersAreLive(t *testing.T) {
+	tgt := testMySQLTarget(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	m := MySQL{}
+	dbName := testMySQLDB(t, "live")
+	cleanupMySQL(t, tgt, dbName)
+
+	admin := mustAdminDB(t, tgt)
+	const counter = "statement/sql/create_db"
+	before := readStatementCounters(ctx, t, admin, []string{counter})
+
+	if _, err := m.Ensure(ctx, tgt, dbName, "", Options{Owner: "ns/live/uid-1"}); err != nil {
+		t.Fatalf("provisioning: %v", err)
+	}
+	after := readStatementCounters(ctx, t, admin, []string{counter})
+
+	if delta := after[counter] - before[counter]; delta != 1 {
+		t.Fatalf("a first provision moved %s by %d, want 1 — the budget test cannot detect anything", counter, delta)
 	}
 }
 
