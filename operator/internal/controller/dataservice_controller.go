@@ -188,8 +188,16 @@ func (r *DataServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		// and stop hammering the server.
 		var notOwned *engine.ErrNotOwned
 		if errors.As(err, &notOwned) {
-			l.Error(err, "refusing to adopt a database owned by another DataService",
-				"database", dbName)
+			// Info, not Error. This is the operator working correctly — the
+			// marker refusing an adoption is the feature, and the outcome is
+			// already reported on the object as phase Conflict with the reason
+			// in a condition. logr's Error path attaches a full stacktrace,
+			// which says "the operator has a bug" about a spec problem only a
+			// human can resolve, and buries the one line that identifies which
+			// database. Seen against a real cluster: two stacktraces for one
+			// refusal that behaved exactly as designed.
+			l.Info("refusing to adopt a database owned by another DataService",
+				"database", dbName, "reason", err.Error())
 			r.setReady(&ds, metav1.ConditionFalse, mimirv1alpha1.ReasonInvalidSpec, err.Error())
 			ds.Status.Phase = "Conflict"
 			return ctrl.Result{}, r.patchStatus(ctx, &ds)
