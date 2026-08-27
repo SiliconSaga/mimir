@@ -14,6 +14,35 @@
 //	  -p 15432:5432 postgres:15
 //	MIMIR_TEST_PG=localhost:15432 go test -tags integration ./internal/engine/...
 //
+// Against a REAL cluster, with tenants going through pgBouncer — the run that
+// matters, because a bare container has no pooler and cannot show whether an
+// assertion was quietly relying on that. Thirteen tests failed the first time
+// this was pointed at one, and none of them were operator bugs.
+//
+// NOT via `kubectl port-forward`. The node side of a forward is socat, and a
+// connection reset on any single stream tears the whole thing down — this suite
+// opens and closes a connection per check, so it dies a few connections in and
+// looks like a TLS fault. It is not: the first connections succeed and a
+// database gets provisioned before it drops. NodePorts avoid it. (The MySQL
+// suite has survived port-forward through HAProxy many times; that is luck
+// rather than immunity, and the same failure is available to it.)
+//
+//	# temporary NodePorts onto the primary (role=primary) and the pooler
+//	# (role=pgbouncer), then:
+//	MIMIR_TEST_PG=127.0.0.1:31432 \
+//	MIMIR_TEST_PG_CONSUMER=127.0.0.1:31433 \
+//	MIMIR_TEST_PG_ADMIN_USER=postgres \
+//	MIMIR_TEST_PG_ADMIN_PASSWORD="$(kubectl get secret <cluster>-pguser-postgres \
+//	  -n <ns> -o jsonpath='{.data.password}' | base64 -d)" \
+//	MIMIR_TEST_PG_TLS=true \
+//	MIMIR_TEST_PG_POOLER_AUTH_ROLE=_crunchypgbouncer \
+//	  go test -tags integration ./internal/engine/... -run 'Test' -v
+//
+// Leaving POOLER_AUTH_ROLE unset while CONSUMER points at a real pgBouncer
+// reproduces the bug #14 and #16 fixed, and the suite fails — which is correct,
+// and is the cheapest way to confirm the harness is really exercising the
+// pooler rather than quietly bypassing it.
+//
 // Skipped unless MIMIR_TEST_PG is set, so the default `go test ./...` stays
 // hermetic and CI does not need a database.
 package engine
