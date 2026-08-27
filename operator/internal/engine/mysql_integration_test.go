@@ -18,6 +18,25 @@
 // Percona XtraDB Cluster works equally well and is what the platform actually
 // runs; plain mysql:8.0 starts faster and shares the SQL surface this exercises.
 //
+// Against a REAL PXC cluster, which is the run that matters before believing
+// any of this — a bare container cannot show whether an assertion was quietly
+// relying on what mysql:8.0 does or does not already contain:
+//
+//	kubectl port-forward -n <ns> svc/<claim>-haproxy 13307:3306 &
+//	MIMIR_TEST_MYSQL=localhost:13307 \
+//	MIMIR_TEST_MYSQL_ADMIN_USER=root \
+//	MIMIR_TEST_MYSQL_ADMIN_PASSWORD="$(kubectl get secret <claim>-secrets -n <ns> \
+//	  -o jsonpath='{.data.root}' | base64 -d)" \
+//	  go test -tags integration ./internal/engine/... -run TestMySQL
+//
+// All 23 pass that way against PXC 8.0.44 through HAProxy. Note the Postgres
+// side found `kubectl port-forward` unreliable for a per-connection suite — the
+// node end is socat, and a reset on any single stream tears the whole forward
+// down — and used two temporary NodePort Services instead. HAProxy has been
+// stable here across many runs, but that is luck rather than immunity: if this
+// suite starts dropping mid-run against a cluster, reach for a NodePort before
+// suspecting the provisioner.
+//
 // Skipped unless MIMIR_TEST_MYSQL is set, so the default `go test ./...` stays
 // hermetic and CI does not need a database.
 package engine

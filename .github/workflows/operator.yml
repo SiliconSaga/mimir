@@ -81,10 +81,16 @@ jobs:
       # Run over BOTH build tags. The integration tests are where the
       # assertions live, and they are exactly the code the default build never
       # compiles. Pinned so a new release cannot fail a build nobody changed.
+      #
+      # Keep this version in step with scripts/lint.sh, and read the ceiling
+      # note there before lowering it: a staticcheck predating the toolchain
+      # cannot parse its export data, and fails with stdlib import errors rather
+      # than saying so. CI is insulated because it takes Go from go.mod;
+      # workstations on a newer toolchain are not.
       - name: staticcheck
         run: |
-          go run honnef.co/go/tools/cmd/staticcheck@2025.1.1 ./...
-          go run honnef.co/go/tools/cmd/staticcheck@2025.1.1 -tags integration ./...
+          go run honnef.co/go/tools/cmd/staticcheck@2026.2.1 ./...
+          go run honnef.co/go/tools/cmd/staticcheck@2026.2.1 -tags integration ./...
 
       - name: go test
         run: go test ./... -count=1
