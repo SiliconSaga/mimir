@@ -752,9 +752,15 @@ func (Postgres) connect(ctx context.Context, t Target, database string) (*pgx.Co
 		// encrypted; the identity check is a hardening follow-up.
 		sslmode = "require"
 	}
-	dsn := fmt.Sprintf("postgres://%s:%s@%s/%s?sslmode=%s",
-		url.QueryEscape(t.AdminUser), url.QueryEscape(t.AdminPassword),
-		hostPort(t.AdminHost, t.AdminPort), url.PathEscape(database), sslmode)
+	// connect_timeout for the same reason the MySQL engine sets its three: the
+	// driver waits forever by default and Reconcile carries no deadline, so an
+	// unreachable server holds a worker rather than failing and requeueing.
+	// Flagged on the MySQL side in review and fixed here too — the exposure was
+	// never engine-specific, it was just found there first.
+	dsn := fmt.Sprintf("postgres://%s@%s/%s?sslmode=%s&connect_timeout=%d",
+		url.UserPassword(t.AdminUser, t.AdminPassword).String(),
+		hostPort(t.AdminHost, t.AdminPort), url.PathEscape(database), sslmode,
+		int(dialTimeout.Seconds()))
 
 	conn, err := pgx.Connect(ctx, dsn)
 	if err != nil {
@@ -765,13 +771,26 @@ func (Postgres) connect(ctx context.Context, t Target, database string) (*pgx.Co
 	return conn, nil
 }
 
+// postgresURI builds the connection string published to the consuming app.
+//
+// url.UserPassword rather than QueryEscape on each half: QueryEscape encodes a
+// space as `+`, which is only a space in a query string. In URI userinfo `+` is
+// a literal plus, so a credential containing a space would be handed to the
+// consumer verbatim-wrong and authentication would fail with nothing to point
+// at. url.UserPassword uses the userinfo escaping rules, where a space becomes
+// %20 and `:` `@` `/` `?` are escaped as well.
+//
+// Latent rather than live for tenants — generated passwords are base64url, so
+// none of them can contain a space — but this string goes into a Secret that
+// consumers paste into their own config, and admin credentials on the connect
+// path are operator-supplied and under no such constraint.
 func postgresURI(t Target, database, user, password string) string {
 	sslmode := "disable"
 	if t.TLS {
 		sslmode = "require"
 	}
-	return fmt.Sprintf("postgres://%s:%s@%s/%s?sslmode=%s",
-		url.QueryEscape(user), url.QueryEscape(password),
+	return fmt.Sprintf("postgres://%s@%s/%s?sslmode=%s",
+		url.UserPassword(user, password).String(),
 		hostPort(t.Host, t.Port), url.PathEscape(database), sslmode)
 }
 

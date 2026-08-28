@@ -55,14 +55,24 @@ case "$mode" in
     exec "$GO" test ./... -count=1 ${rest[@]+"${rest[@]}"}
     ;;
   integration)
-    # The provisioner tests need a real PostgreSQL: identifier quoting can be
+    # The provisioner tests need a real server: identifier quoting can be
     # unit-tested, but "does the server actually refuse a cross-tenant
-    # connection after REVOKE CONNECT" is a property of the server.
-    if [ -z "${MIMIR_TEST_PG:-}" ]; then
-      echo "MIMIR_TEST_PG is not set — the integration tests would skip." >&2
+    # connection" is a property of the server, not of this code. Postgres has to
+    # be asked whether REVOKE CONNECT holds; MySQL has to be asked whether an
+    # escaped GRANT really stops matching a neighbouring database as a pattern.
+    #
+    # At least one, not both. Each engine's tests skip themselves when their own
+    # variable is unset, so requiring both would stop anyone from exercising one
+    # engine — and requiring neither would let the whole suite skip silently and
+    # still exit 0, which is the failure this guard exists to prevent.
+    if [ -z "${MIMIR_TEST_PG:-}" ] && [ -z "${MIMIR_TEST_MYSQL:-}" ]; then
+      echo "Neither MIMIR_TEST_PG nor MIMIR_TEST_MYSQL is set — the integration tests would all skip." >&2
       echo "Start a throwaway server and point at it:" >&2
       echo "  docker run -d --name mimir-pgtest -e POSTGRES_PASSWORD=testadminpw -p 15432:5432 postgres:15" >&2
       echo "  MIMIR_TEST_PG=localhost:15432 scripts/test.sh --integration" >&2
+      echo >&2
+      echo "  docker run -d --name mimir-mysqltest -e MYSQL_ROOT_PASSWORD=testadminpw -p 13306:3306 mysql:8.0" >&2
+      echo "  MIMIR_TEST_MYSQL=localhost:13306 scripts/test.sh --integration" >&2
       exit 1
     fi
     GO="$(find_go)"

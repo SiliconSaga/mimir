@@ -53,6 +53,17 @@ type SharedCluster struct {
 	AdminSecretNamespace string
 	AdminUserKey         string
 	AdminPasswordKey     string
+	// AdminUser is the admin account name given literally, used INSTEAD of
+	// reading AdminUserKey from the Secret.
+	//
+	// Needed because operators disagree about Secret shape. Percona's Postgres
+	// operator publishes <cluster>-pguser-<user> containing both `user` and
+	// `password`, so a key lookup works. Percona's XtraDB operator publishes
+	// <cluster>-secrets whose KEYS ARE THE USERNAMES and whose values are the
+	// passwords — `root`, `monitor`, `xtrabackup`. There is no key holding the
+	// string "root", so no value of AdminUserKey can resolve it, and a
+	// key-only design simply cannot be pointed at a PXC cluster.
+	AdminUser string
 	// AdminDatabase to connect to for administering others.
 	AdminDatabase string
 	// TLS is whether the server requires an encrypted connection.
@@ -177,8 +188,16 @@ func (r *DataServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		// and stop hammering the server.
 		var notOwned *engine.ErrNotOwned
 		if errors.As(err, &notOwned) {
-			l.Error(err, "refusing to adopt a database owned by another DataService",
-				"database", dbName)
+			// Info, not Error. This is the operator working correctly — the
+			// marker refusing an adoption is the feature, and the outcome is
+			// already reported on the object as phase Conflict with the reason
+			// in a condition. logr's Error path attaches a full stacktrace,
+			// which says "the operator has a bug" about a spec problem only a
+			// human can resolve, and buries the one line that identifies which
+			// database. Seen against a real cluster: two stacktraces for one
+			// refusal that behaved exactly as designed.
+			l.Info("refusing to adopt a database owned by another DataService",
+				"database", dbName, "reason", err.Error())
 			r.setReady(&ds, metav1.ConditionFalse, mimirv1alpha1.ReasonInvalidSpec, err.Error())
 			ds.Status.Phase = "Conflict"
 			return ctrl.Result{}, r.patchStatus(ctx, &ds)
@@ -298,11 +317,7 @@ func (r *DataServiceReconciler) reconcileDelete(ctx context.Context, ds *mimirv1
 // caller's comment says it prevents, and the leftover name then blocks the
 // next request for it with an ownership conflict.
 func (r *DataServiceReconciler) dropShared(ctx context.Context, ds *mimirv1alpha1.DataService) error {
-	// Nothing was ever provisioned — a request that failed validation, or lost
-	// an ownership conflict before Ensure returned. There is no database of
-	// ours to drop, and guessing a name here is how the conflict-losing object
-	// would delete the winner's database.
-	db := ds.Status.ProvisionedDatabase
+	db := databaseToDrop(ds)
 	if db == "" {
 		return nil
 	}
@@ -325,6 +340,41 @@ func (r *DataServiceReconciler) dropShared(ctx context.Context, ds *mimirv1alpha
 	return prov.Drop(ctx, target, db, ds.Owner())
 }
 
+// databaseToDrop picks the physical name to clean up, or "" for nothing to do.
+//
+// An empty status does NOT mean nothing was provisioned, which is the whole
+// reason this is not simply a field read. Ensure mutates the server in several
+// steps — ownership row, account, database, grant — and the controller records
+// the name only once all of them have succeeded. A failing grant, a write
+// timeout after CREATE DATABASE, or the status patch itself losing a conflict
+// each leave a real database behind with an empty status. Treating that as
+// "nothing to do" released the finalizer and orphaned it, which is precisely
+// what the deletion path exists to prevent.
+//
+// So it falls back to the derived name. Guessing is safe HERE, though it was
+// not always, and the distinction is worth stating plainly because the comment
+// this replaces argued the opposite: Drop is owner-guarded. It consults the
+// ownership marker and returns nil for a database recorded to another
+// DataService or standing unmarked, so a conflict-losing object calling this
+// cannot delete the winner's database — the marker is what stops it, and that
+// guard postdates the fear.
+//
+// A name the provisioner would reject outright yields "" instead. Drop
+// validates the identifier and errors on a bad one, and such a request never
+// reached the server at all, so there is genuinely nothing to clean up —
+// erroring would strand the finalizer on an object that never provisioned
+// anything.
+func databaseToDrop(ds *mimirv1alpha1.DataService) string {
+	if db := ds.Status.ProvisionedDatabase; db != "" {
+		return db
+	}
+	candidate := ds.ResolvedDatabaseName()
+	if engine.ValidateIdentifier(candidate) != nil {
+		return ""
+	}
+	return candidate
+}
+
 // resolveTarget reads the admin credentials for a shared cluster.
 func (r *DataServiceReconciler) resolveTarget(ctx context.Context, s SharedCluster) (engine.Target, error) {
 	var secret corev1.Secret
@@ -333,10 +383,19 @@ func (r *DataServiceReconciler) resolveTarget(ctx context.Context, s SharedClust
 		return engine.Target{}, fmt.Errorf("read admin secret %s: %w", key, err)
 	}
 
-	user, ok := secret.Data[s.AdminUserKey]
-	if !ok {
-		return engine.Target{}, fmt.Errorf("admin secret %s has no key %q", key, s.AdminUserKey)
+	// A literal admin user wins over a key lookup. The password still comes
+	// from the Secret either way — that is the part that must not be config.
+	adminUser := s.AdminUser
+	if adminUser == "" {
+		user, ok := secret.Data[s.AdminUserKey]
+		if !ok {
+			return engine.Target{}, fmt.Errorf("admin secret %s has no key %q "+
+				"(set the engine's ADMIN_USER if the operator publishes passwords under username keys)",
+				key, s.AdminUserKey)
+		}
+		adminUser = string(user)
 	}
+
 	pass, ok := secret.Data[s.AdminPasswordKey]
 	if !ok {
 		return engine.Target{}, fmt.Errorf("admin secret %s has no key %q", key, s.AdminPasswordKey)
@@ -347,7 +406,7 @@ func (r *DataServiceReconciler) resolveTarget(ctx context.Context, s SharedClust
 		Port:           s.Port,
 		AdminHost:      s.AdminHost,
 		AdminPort:      s.AdminPort,
-		AdminUser:      string(user),
+		AdminUser:      adminUser,
 		AdminPassword:  string(pass),
 		AdminDatabase:  s.AdminDatabase,
 		TLS:            s.TLS,

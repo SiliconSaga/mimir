@@ -44,6 +44,22 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      # And a real MySQL, for the same reason. The MySQL provisioner's isolation
+      # depends on escaping LIKE metacharacters in the GRANT, and whether that
+      # escaping works is a fact about MySQL's grant matching rather than about
+      # this code — its test carries a negative control that asserts the
+      # UNESCAPED form really does leak, which needs a server to be meaningful.
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: testadminpw
+        ports:
+          - 13306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 --silent"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
         with:
@@ -58,14 +74,37 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      # staticcheck catches the shape vet does not: an expression that cannot be
+      # false. A test here compared a derived name against itself and asserted
+      # nothing, and a human found it by reading the diff — SA4000 reports it.
+      #
+      # Run over BOTH build tags. The integration tests are where the
+      # assertions live, and they are exactly the code the default build never
+      # compiles. Pinned so a new release cannot fail a build nobody changed.
+      #
+      # Keep this version in step with scripts/lint.sh, and read the ceiling
+      # note there before lowering it: a staticcheck predating the toolchain
+      # cannot parse its export data, and fails with stdlib import errors rather
+      # than saying so. CI is insulated because it takes Go from go.mod;
+      # workstations on a newer toolchain are not.
+      - name: staticcheck
+        run: |
+          go run honnef.co/go/tools/cmd/staticcheck@2026.2.1 ./...
+          go run honnef.co/go/tools/cmd/staticcheck@2026.2.1 -tags integration ./...
+
       - name: go test
         run: go test ./... -count=1
 
-      # Behind a build tag and skipped without MIMIR_TEST_PG, so the plain
-      # `go test ./...` above stays hermetic.
+      # Behind a build tag and skipped without MIMIR_TEST_PG / MIMIR_TEST_MYSQL,
+      # so the plain `go test ./...` above stays hermetic.
+      #
+      # Both engines run in one step: each test skips itself when its own
+      # variable is unset, so a single invocation covers whatever is configured
+      # and stays correct if an engine is added or removed here.
       - name: integration tests
         env:
           MIMIR_TEST_PG: localhost:15432
+          MIMIR_TEST_MYSQL: localhost:13306
         run: go test -tags integration ./internal/engine/... -count=1 -v
 
       # The Deployment pins a tag that this workflow is responsible for

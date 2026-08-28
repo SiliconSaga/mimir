@@ -14,6 +14,35 @@
 //	  -p 15432:5432 postgres:15
 //	MIMIR_TEST_PG=localhost:15432 go test -tags integration ./internal/engine/...
 //
+// Against a REAL cluster, with tenants going through pgBouncer — the run that
+// matters, because a bare container has no pooler and cannot show whether an
+// assertion was quietly relying on that. Thirteen tests failed the first time
+// this was pointed at one, and none of them were operator bugs.
+//
+// NOT via `kubectl port-forward`. The node side of a forward is socat, and a
+// connection reset on any single stream tears the whole thing down — this suite
+// opens and closes a connection per check, so it dies a few connections in and
+// looks like a TLS fault. It is not: the first connections succeed and a
+// database gets provisioned before it drops. NodePorts avoid it. (The MySQL
+// suite has survived port-forward through HAProxy many times; that is luck
+// rather than immunity, and the same failure is available to it.)
+//
+//	# temporary NodePorts onto the primary (role=primary) and the pooler
+//	# (role=pgbouncer), then:
+//	MIMIR_TEST_PG=127.0.0.1:31432 \
+//	MIMIR_TEST_PG_CONSUMER=127.0.0.1:31433 \
+//	MIMIR_TEST_PG_ADMIN_USER=postgres \
+//	MIMIR_TEST_PG_ADMIN_PASSWORD="$(kubectl get secret <cluster>-pguser-postgres \
+//	  -n <ns> -o jsonpath='{.data.password}' | base64 -d)" \
+//	MIMIR_TEST_PG_TLS=true \
+//	MIMIR_TEST_PG_POOLER_AUTH_ROLE=_crunchypgbouncer \
+//	  go test -tags integration ./internal/engine/... -run 'Test' -v
+//
+// Leaving POOLER_AUTH_ROLE unset while CONSUMER points at a real pgBouncer
+// reproduces the bug #14 and #16 fixed, and the suite fails — which is correct,
+// and is the cheapest way to confirm the harness is really exercising the
+// pooler rather than quietly bypassing it.
+//
 // Skipped unless MIMIR_TEST_PG is set, so the default `go test ./...` stays
 // hermetic and CI does not need a database.
 package engine
@@ -25,6 +54,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -48,33 +78,86 @@ func testDB(t *testing.T, stem string) string {
 	return stem + "_" + hex.EncodeToString(b[:])
 }
 
+// splitAddr parses a host:port, keeping a bracketed IPv6 literal intact.
+func splitAddr(t *testing.T, envName, addr string) (string, int32) {
+	t.Helper()
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("%s must be host:port, got %q: %v", envName, addr, err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("bad port in %s: %v", envName, err)
+	}
+	if port < 1 || port > 65535 {
+		t.Fatalf("port %d in %s out of range", port, envName)
+	}
+	return host, int32(port)
+}
+
+// testTarget describes the server under test.
+//
+// The consumer and admin endpoints are configurable SEPARATELY, and that is the
+// point rather than a convenience. Postgres genuinely splits the two — the
+// pooler for consumers, the primary for DDL — and a harness that collapses them
+// cannot exercise a pooler at all. Two pull requests went into a pgBouncer
+// authentication bug that a tenant-through-the-pooler test would have caught on
+// the first run, while these tests stayed green throughout.
+//
+//	MIMIR_TEST_PG                   host:port of the ADMIN endpoint. Required.
+//	MIMIR_TEST_PG_CONSUMER          host:port tenants connect to. Defaults to
+//	                                MIMIR_TEST_PG, which is right for a bare
+//	                                container and wrong for a real cluster.
+//	MIMIR_TEST_PG_ADMIN_USER        default "postgres"
+//	MIMIR_TEST_PG_ADMIN_PASSWORD    default "testadminpw"
+//	MIMIR_TEST_PG_TLS               "true" to require encryption, as Percona does
+//	MIMIR_TEST_PG_POOLER_AUTH_ROLE  the pooler's own account, when one is in
+//	                                front. Empty against a bare server, which is
+//	                                why the default is empty — but pointing
+//	                                CONSUMER at a real pgBouncer without ALSO
+//	                                setting this reproduces the original bug,
+//	                                and the suite fails, which is correct.
 func testTarget(t *testing.T) Target {
 	t.Helper()
 	addr := os.Getenv("MIMIR_TEST_PG")
 	if addr == "" {
 		t.Skip("MIMIR_TEST_PG not set")
 	}
-	// SplitHostPort rather than Cut, so a bracketed IPv6 literal parses.
-	host, portStr, err := net.SplitHostPort(addr)
-	if err != nil {
-		t.Fatalf("MIMIR_TEST_PG must be host:port, got %q: %v", addr, err)
+	adminHost, adminPort := splitAddr(t, "MIMIR_TEST_PG", addr)
+
+	host, port := adminHost, adminPort
+	if consumer := os.Getenv("MIMIR_TEST_PG_CONSUMER"); consumer != "" {
+		host, port = splitAddr(t, "MIMIR_TEST_PG_CONSUMER", consumer)
 	}
-	port, err := strconv.Atoi(portStr)
-	if err != nil {
-		t.Fatalf("bad port in MIMIR_TEST_PG: %v", err)
+
+	user := os.Getenv("MIMIR_TEST_PG_ADMIN_USER")
+	if user == "" {
+		user = "postgres"
 	}
-	if port < 1 || port > 65535 {
-		t.Fatalf("port %d in MIMIR_TEST_PG out of range", port)
+	password := os.Getenv("MIMIR_TEST_PG_ADMIN_PASSWORD")
+	if password == "" {
+		password = "testadminpw"
 	}
+
 	return Target{
-		Host: host, Port: int32(port),
-		AdminHost: host, AdminPort: int32(port),
-		AdminUser: "postgres", AdminPassword: "testadminpw",
+		Host: host, Port: port,
+		AdminHost: adminHost, AdminPort: adminPort,
+		AdminUser: user, AdminPassword: password,
 		AdminDatabase: "postgres",
-		// The throwaway container serves plaintext. Production targets are
+		// The throwaway container serves plaintext. Percona clusters are
 		// hostssl-only, which the provisioner handles via Target.TLS.
-		TLS: false,
+		TLS:            os.Getenv("MIMIR_TEST_PG_TLS") == "true",
+		PoolerAuthRole: os.Getenv("MIMIR_TEST_PG_POOLER_AUTH_ROLE"),
 	}
+}
+
+// sslMode matches what the provisioner itself uses, so a test connection is
+// refused or accepted for the same reasons a real one would be.
+func sslMode(tgt Target) string {
+	if tgt.TLS {
+		return "require"
+	}
+	return "disable"
 }
 
 // cleanup drops a database on a bounded context and reports failure.
@@ -94,18 +177,61 @@ func cleanup(t *testing.T, tgt Target, database string) {
 	})
 }
 
+// pgURI assembles a connection string with the credential ESCAPED.
+//
+// Escaping is not optional here, and a throwaway container hides that: its
+// password is `testadminpw`, and generated tenant passwords are base64url, so
+// nothing in either needs quoting. A real cluster's admin password does — the
+// live one contains a colon, which turns `user:pass@host:port` into a parse
+// error about an "invalid port", naming a fragment of the password in the
+// message.
+//
+// url.UserPassword rather than QueryEscape per half, matching the provisioner:
+// QueryEscape encodes a space as `+`, which means a space only in a query
+// string. Userinfo reads `+` literally, so a credential with a space would be
+// silently corrupted. Escaping was never the missing piece — using the query
+// escaper for a userinfo component was.
+func pgURI(user, password, host string, port int32, database, sslmode string) string {
+	return fmt.Sprintf("postgres://%s@%s/%s?sslmode=%s",
+		url.UserPassword(user, password).String(),
+		net.JoinHostPort(host, strconv.Itoa(int(port))), url.PathEscape(database),
+		sslmode)
+}
+
 // adminURI is the superuser connection string for direct catalog checks.
+//
+// Deliberately the ADMIN endpoint: this is the test acting as the operator, and
+// DDL cannot go through a pooler in transaction mode.
 func adminURI(tgt Target) string {
-	return fmt.Sprintf("postgres://%s:%s@%s/%s?sslmode=disable",
-		tgt.AdminUser, tgt.AdminPassword,
-		net.JoinHostPort(tgt.AdminHost, strconv.Itoa(int(tgt.AdminPort))), tgt.AdminDatabase)
+	return pgURI(tgt.AdminUser, tgt.AdminPassword, tgt.AdminHost, tgt.AdminPort,
+		tgt.AdminDatabase, sslMode(tgt))
+}
+
+// consumerURI is a connection string for the endpoint a TENANT is handed.
+//
+// The distinction is the whole point. A tenant's Secret names Host/Port — the
+// pooler where one exists — and a test that reaches for AdminHost instead is
+// testing a path no consumer ever takes. That is not hypothetical here: the
+// published URI pointed at a pooler that could not authenticate anyone, for
+// weeks, while these tests connected straight to the primary and passed.
+func consumerURI(tgt Target, user, password, database string) string {
+	return pgURI(user, password, tgt.Host, tgt.Port, database, sslMode(tgt))
 }
 
 // connectAs opens a connection with an arbitrary credential, which is how a
-// tenant's own connection is simulated.
+// tenant's own connection is simulated — over the consumer endpoint, because
+// that is what a tenant actually has.
 func connectAs(ctx context.Context, tgt Target, user, password, database string) error {
-	uri := fmt.Sprintf("postgres://%s:%s@%s/%s?sslmode=disable",
-		user, password, net.JoinHostPort(tgt.AdminHost, strconv.Itoa(int(tgt.AdminPort))), database)
+	return pingWith(ctx, consumerURI(tgt, user, password, database))
+}
+
+// connectDirect is the same check against the SERVER endpoint, for the handful
+// of cases whose subject is explicitly a deployment with no pooler in front.
+func connectDirect(ctx context.Context, tgt Target, user, password, database string) error {
+	return pingWith(ctx, serverURI(tgt, user, password, database))
+}
+
+func pingWith(ctx context.Context, uri string) error {
 	conn, err := pgx.Connect(ctx, uri)
 	if err != nil {
 		return err
@@ -549,13 +675,45 @@ func TestDropRemovesEverything(t *testing.T) {
 	cleanup(t, tgt, dropDB)
 }
 
-// tenantURI is a connection string for an arbitrary credential against a named
-// database, on the ADMIN endpoint — the tests talk to a bare server with no
-// pooler in front, so that is the only endpoint there is.
-func tenantURI(tgt Target, user, password, database string) string {
-	return fmt.Sprintf("postgres://%s:%s@%s/%s?sslmode=disable",
-		user, password,
-		net.JoinHostPort(tgt.AdminHost, strconv.Itoa(int(tgt.AdminPort))), database)
+// serverURI is a connection string against the ADMIN endpoint, for the parties
+// that genuinely belong there: the operator's own admin work, and the pooler
+// itself.
+//
+// A pooler is a client of the server, so simulating what pgBouncer does — log
+// in as its auth role and call get_auth — means connecting server-side, not
+// through the pooler. Tenants use consumerURI instead.
+func serverURI(tgt Target, user, password, database string) string {
+	return pgURI(user, password, tgt.AdminHost, tgt.AdminPort, database, sslMode(tgt))
+}
+
+// serverSuppliesGetAuth reports whether the SERVER already ships the pooler's
+// lookup function, by looking for it in template1.
+//
+// This is the difference between a bare postgres:15 container and a real
+// Percona cluster, and several tests below only make sense on one side of it.
+// Percona installs pgbouncer.get_auth into template1, so every database
+// CREATE DATABASE makes inherits it and the operator's own fallback never runs
+// — which means assertions about OUR function's ownership and pinned
+// search_path have nothing to attach to. Asserting them anyway produced three
+// confident failures against a healthy cluster.
+func serverSuppliesGetAuth(ctx context.Context, t *testing.T, tgt Target) bool {
+	t.Helper()
+	conn, err := pgx.Connect(ctx, serverURI(tgt, tgt.AdminUser, tgt.AdminPassword, "template1"))
+	if err != nil {
+		t.Fatalf("connect to template1: %v", err)
+	}
+	defer func() { _ = conn.Close(ctx) }()
+
+	var present bool
+	if err := conn.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+			 WHERE n.nspname = $1 AND p.proname = $2)`,
+		poolerAuthSchema, poolerAuthFunction,
+	).Scan(&present); err != nil {
+		t.Fatalf("looking for a server-supplied get_auth: %v", err)
+	}
+	return present
 }
 
 // poolerAuthPassword is fixed because the role is created and thrown away
@@ -636,7 +794,7 @@ func TestPoolerAuthBootstrap(t *testing.T) {
 
 	// What pgBouncer actually does: connect AS the auth role INTO the tenant's
 	// database, then look the tenant's password up there.
-	poolerConn, err := pgx.Connect(ctx, tenantURI(tgt, authRole, poolerAuthPassword, db))
+	poolerConn, err := pgx.Connect(ctx, serverURI(tgt, authRole, poolerAuthPassword, db))
 	if err != nil {
 		t.Fatalf("the pooler role cannot reach %q, so every client through the pooler is refused: %v", db, err)
 	}
@@ -661,7 +819,7 @@ func TestPoolerAuthBootstrap(t *testing.T) {
 	// credentials of every other one — the opposite of what this operator is
 	// for, delivered by the fix for a connectivity bug.
 	t.Run("tenant cannot read the lookup", func(t *testing.T) {
-		conn, err := pgx.Connect(ctx, tenantURI(tgt, creds.Username, creds.Password, db))
+		conn, err := pgx.Connect(ctx, serverURI(tgt, creds.Username, creds.Password, db))
 		if err != nil {
 			t.Fatalf("tenant cannot reach its own database: %v", err)
 		}
@@ -689,7 +847,16 @@ func TestPoolerAuthBootstrap(t *testing.T) {
 	// either, a tenant can shadow pg_catalog or replace the function outright
 	// and have it run with the admin role's rights.
 	t.Run("definer function is hardened", func(t *testing.T) {
-		conn, err := pgx.Connect(ctx, tenantURI(tgt, tgt.AdminUser, tgt.AdminPassword, db))
+		// Only meaningful when the fallback actually ran. On a server that
+		// supplies its own get_auth the operator deliberately leaves it alone,
+		// so this would be asserting our hardening against Percona's function
+		// — which pins no search_path, and does not need to: it is theirs, and
+		// it is stricter than ours in the ways that matter.
+		if serverSuppliesGetAuth(ctx, t, tgt) {
+			t.Skip("server supplies get_auth — the operator's fallback did not run, so its hardening is not what is installed")
+		}
+
+		conn, err := pgx.Connect(ctx, serverURI(tgt, tgt.AdminUser, tgt.AdminPassword, db))
 		if err != nil {
 			t.Fatalf("admin connect to %q: %v", db, err)
 		}
@@ -735,10 +902,20 @@ func TestPoolerAuthBootstrap(t *testing.T) {
 // existing owner — so a definer function meant to run as the admin role would
 // end up running as the tenant, and the pooler would stop being able to
 // authenticate anyone against that database.
+//
+// Only reachable on a server that does not supply its own pgbouncer schema.
+// Where one is inherited from template1 the tenant cannot get there first — the
+// schema exists the instant the database does — so the squat this guards
+// against is not a state that arises. Skipped rather than reshaped, because a
+// version that "works" on both would no longer be testing the race.
 func TestPoolerAuthReclaimsATenantOwnedSchema(t *testing.T) {
 	tgt := testTarget(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
+
+	if serverSuppliesGetAuth(ctx, t, tgt) {
+		t.Skip("server supplies the pgbouncer schema via template1 — a tenant cannot create it first, so this race does not exist here")
+	}
 
 	authRole := createPoolerRole(t, tgt)
 
@@ -755,7 +932,7 @@ func TestPoolerAuthReclaimsATenantOwnedSchema(t *testing.T) {
 	}
 
 	// The tenant squats the name, as it is entitled to do in its own database.
-	tenantConn, err := pgx.Connect(ctx, tenantURI(tgt, creds.Username, creds.Password, db))
+	tenantConn, err := pgx.Connect(ctx, serverURI(tgt, creds.Username, creds.Password, db))
 	if err != nil {
 		t.Fatalf("tenant connect: %v", err)
 	}
@@ -784,7 +961,7 @@ func TestPoolerAuthReclaimsATenantOwnedSchema(t *testing.T) {
 
 	// The pooler must now be able to authenticate against it, with the real
 	// verifier rather than the tenant's decoy.
-	poolerConn, err := pgx.Connect(ctx, tenantURI(tgt, authRole, poolerAuthPassword, db))
+	poolerConn, err := pgx.Connect(ctx, serverURI(tgt, authRole, poolerAuthPassword, db))
 	if err != nil {
 		t.Fatalf("pooler role cannot reach %q: %v", db, err)
 	}
@@ -803,7 +980,7 @@ func TestPoolerAuthReclaimsATenantOwnedSchema(t *testing.T) {
 	// The replacement must belong to the admin role. A function left owned by
 	// the tenant runs as the tenant under SECURITY DEFINER, which fails closed
 	// on pg_authid — safe, but it breaks auth for a live service.
-	adminConn, err := pgx.Connect(ctx, tenantURI(tgt, tgt.AdminUser, tgt.AdminPassword, db))
+	adminConn, err := pgx.Connect(ctx, serverURI(tgt, tgt.AdminUser, tgt.AdminPassword, db))
 	if err != nil {
 		t.Fatalf("admin connect to %q: %v", db, err)
 	}
@@ -890,7 +1067,7 @@ func TestPoolerAuthLeavesTheServersOwnFunctionAlone(t *testing.T) {
 		t.Fatalf("provisioning: %v", err)
 	}
 
-	adminConn, err := pgx.Connect(ctx, tenantURI(tgt, tgt.AdminUser, tgt.AdminPassword, db))
+	adminConn, err := pgx.Connect(ctx, serverURI(tgt, tgt.AdminUser, tgt.AdminPassword, db))
 	if err != nil {
 		t.Fatalf("admin connect to %q: %v", db, err)
 	}
@@ -950,7 +1127,7 @@ func TestPoolerAuthLeavesTheServersOwnFunctionAlone(t *testing.T) {
 	}
 
 	// And the pooler must still be able to use it.
-	poolerConn, err := pgx.Connect(ctx, tenantURI(tgt, authRole, poolerAuthPassword, db))
+	poolerConn, err := pgx.Connect(ctx, serverURI(tgt, authRole, poolerAuthPassword, db))
 	if err != nil {
 		t.Fatalf("pooler role cannot reach %q: %v", db, err)
 	}
@@ -974,7 +1151,7 @@ func TestPoolerAuthLeavesTheServersOwnFunctionAlone(t *testing.T) {
 	// the whole distinction between deferring to the server's authentication
 	// policy and inheriting its accidents.
 	t.Run("tenant cannot read the preserved lookup", func(t *testing.T) {
-		conn, err := pgx.Connect(ctx, tenantURI(tgt, creds.Username, creds.Password, db))
+		conn, err := pgx.Connect(ctx, serverURI(tgt, creds.Username, creds.Password, db))
 		if err != nil {
 			t.Fatalf("tenant cannot reach its own database: %v", err)
 		}
@@ -998,6 +1175,13 @@ func TestPoolerAuthLeavesTheServersOwnFunctionAlone(t *testing.T) {
 // server with no pooler of that shape in front of it — a direct-to-primary
 // deployment, or a different pooler entirely. An absent role is a fact about
 // the deployment, not a failure, and the bootstrap defaults to on.
+//
+// The tenant check deliberately uses the SERVER endpoint rather than
+// connectAs, because the scenario this describes is "there is no pooler". Run
+// against a real cluster with a consumer endpoint configured, going through
+// pgBouncer here would assert that a database with no pooler bootstrap is
+// reachable through the pooler — which is precisely the thing that is not true,
+// and is the bug the bootstrap exists to fix.
 func TestPoolerAuthSkippedWhenRoleAbsent(t *testing.T) {
 	tgt := testTarget(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -1013,23 +1197,98 @@ func TestPoolerAuthSkippedWhenRoleAbsent(t *testing.T) {
 	}
 	cleanup(t, tgt, db)
 
-	if err := connectAs(ctx, tgt, creds.Username, creds.Password, db); err != nil {
+	if err := connectDirect(ctx, tgt, creds.Username, creds.Password, db); err != nil {
 		t.Fatalf("tenant cannot reach its own database: %v", err)
 	}
 
-	conn, err := pgx.Connect(ctx, tenantURI(tgt, tgt.AdminUser, tgt.AdminPassword, db))
+	conn, err := pgx.Connect(ctx, serverURI(tgt, tgt.AdminUser, tgt.AdminPassword, db))
 	if err != nil {
 		t.Fatalf("admin connect to %q: %v", db, err)
 	}
 	defer func() { _ = conn.Close(ctx) }()
 
+	// "The schema is absent" is the wrong question on a server that ships one.
+	// Percona installs the pgbouncer schema into template1, so every database
+	// inherits it at CREATE DATABASE and finding it here says nothing about
+	// whether the operator did anything. What must be true either way is that
+	// the operator did not GRANT the absent role anything — checked directly,
+	// so this reads the same on a bare container and on a real cluster.
 	var exists bool
 	if err := conn.QueryRow(ctx,
-		`SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'pgbouncer')`,
+		`SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $1)`, poolerAuthSchema,
 	).Scan(&exists); err != nil {
 		t.Fatalf("checking for the pgbouncer schema: %v", err)
 	}
-	if exists {
+	if exists && !serverSuppliesGetAuth(ctx, t, tgt) {
 		t.Error("bootstrapped pooler auth for a role that does not exist")
+	}
+
+	var granted bool
+	if err := conn.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)`, "no_such_pooler_role_here",
+	).Scan(&granted); err != nil {
+		t.Fatalf("checking the absent role stayed absent: %v", err)
+	}
+	if granted {
+		t.Error("the bootstrap created the pooler role it was supposed to skip")
+	}
+}
+
+// TestRefusesServerOwnedNames answers, for Postgres, the reserved-name question
+// the MySQL engine had to solve explicitly.
+//
+// There it was a real hole: the operator keeps its ownership register in its own
+// `mimir_dataservice` schema, `ValidateIdentifier` accepts that string, and a
+// DataService in namespace `mimir` named `dataservice` derives exactly it —
+// which would have granted that tenant rights over every other tenant's record.
+// MySQL now rejects the name outright.
+//
+// Postgres has no such shared object: ownership lives in COMMENT ON DATABASE and
+// COMMENT ON ROLE, attached to the objects themselves, so there is no register to
+// capture. The names worth worrying about are instead the server's own — the
+// admin database, and the roles the cluster operator created. Those are already
+// covered, but by a general mechanism rather than a list: an existing database
+// or role without our marker is refused, so "reserved" falls out of "not ours".
+//
+// Written as a test because "already covered" is a claim, and the MySQL case is
+// what a wrong claim of that shape costs.
+func TestRefusesServerOwnedNames(t *testing.T) {
+	tgt := testTarget(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	authRole := createPoolerRole(t, tgt)
+	p := Postgres{}
+
+	for _, tc := range []struct {
+		name  string
+		what  string
+		why   string
+		owner string
+	}{
+		{
+			name: "the admin database itself",
+			what: tgt.AdminDatabase,
+			why:  "adopting it would hand a tenant the database the operator administers from",
+		},
+		{
+			// The pooler's own identity. Vending it would publish a working
+			// password for the account pgBouncer authenticates as, which reads
+			// every login role's verifier.
+			name: "the pooler's service role",
+			what: authRole,
+			why:  "adopting it would publish a credential for the pooler's own account",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := p.Ensure(ctx, tgt, tc.what, "", Options{Owner: "ns/squatter/uid-1"})
+			if err == nil {
+				t.Fatalf("provisioning %q succeeded — %s", tc.what, tc.why)
+			}
+			var notOwned *ErrNotOwned
+			if !errors.As(err, &notOwned) {
+				t.Fatalf("provisioning %q failed, but not as an ownership refusal — got %v", tc.what, err)
+			}
+		})
 	}
 }

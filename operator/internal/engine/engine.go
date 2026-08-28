@@ -8,8 +8,25 @@ package engine
 import (
 	"context"
 	"fmt"
+	"time"
 
 	mimirv1alpha1 "github.com/SiliconSaga/mimir/operator/api/v1alpha1"
+)
+
+// Connection deadlines, shared by every engine.
+//
+// Neither driver sets one by default, and controller-runtime gives Reconcile no
+// deadline either, so without these an unresponsive server holds a reconcile
+// worker forever. The worker pool is small, so that is not one stuck tenant —
+// it is the controller stopping, for every engine, while looking healthy.
+//
+// Generous rather than tight: these are a backstop against a server that is
+// gone, not a latency budget. A shared cluster under load can be slow to answer
+// DDL without anything being wrong, and a timeout that fires then would turn
+// contention into a reconcile error.
+const (
+	dialTimeout = 10 * time.Second
+	ioTimeout   = 30 * time.Second
 )
 
 // Target describes the server a database is being vended inside.

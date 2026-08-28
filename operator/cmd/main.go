@@ -62,7 +62,7 @@ func main() {
 		setupLog.Info("no shared clusters configured; shared placement will report ClusterNotFound")
 	}
 
-	registry := engine.NewRegistry(engine.Postgres{})
+	registry := engine.NewRegistry(engine.Postgres{}, engine.MySQL{})
 	setupLog.Info("engines registered", "engines", registry.Engines())
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
@@ -128,11 +128,22 @@ func main() {
 //	MIMIR_POSTGRES_ADMIN_HOST            default = HOST — where DDL runs
 //	MIMIR_POSTGRES_ADMIN_PORT            default = PORT
 //	MIMIR_POSTGRES_ADMIN_SECRET          required, "namespace/name"
+//	MIMIR_POSTGRES_ADMIN_USER            optional — literal name, wins over the key
 //	MIMIR_POSTGRES_ADMIN_USER_KEY        default "user"
 //	MIMIR_POSTGRES_ADMIN_PASSWORD_KEY    default "password"
 //	MIMIR_POSTGRES_ADMIN_DATABASE        default "postgres"
 //	MIMIR_POSTGRES_TLS                   default "true"
 //	MIMIR_POSTGRES_POOLER_AUTH_ROLE      default "_crunchypgbouncer"; "" disables
+//
+// MySQL differs in where the admin credential lives, because the XtraDB
+// operator's Secret is keyed by username rather than carrying `user`/`password`:
+//
+//	MIMIR_MYSQL_ADMIN_USER               "root" — must be given literally
+//	MIMIR_MYSQL_ADMIN_PASSWORD_KEY       defaults to "root", the PXC convention
+//	MIMIR_MYSQL_ADMIN_DATABASE           default "mysql"
+//
+// MySQL needs no pooler-auth role: HAProxy proxies connections rather than
+// authenticating them itself, so there is nothing to bootstrap.
 func sharedClustersFromEnv() (map[mimirv1alpha1.Engine]controller.SharedCluster, error) {
 	out := map[mimirv1alpha1.Engine]controller.SharedCluster{}
 
@@ -200,8 +211,9 @@ func sharedClustersFromEnv() (map[mimirv1alpha1.Engine]controller.SharedCluster,
 			AdminPort:            adminPort,
 			AdminSecretNamespace: ns,
 			AdminSecretName:      name,
+			AdminUser:            os.Getenv(prefix + "ADMIN_USER"),
 			AdminUserKey:         envOr(prefix+"ADMIN_USER_KEY", "user"),
-			AdminPasswordKey:     envOr(prefix+"ADMIN_PASSWORD_KEY", "password"),
+			AdminPasswordKey:     envOr(prefix+"ADMIN_PASSWORD_KEY", defaultAdminPasswordKey(e)),
 			AdminDatabase:        envOr(prefix+"ADMIN_DATABASE", defaultAdminDatabase(e)),
 			TLS:                  tls,
 			PoolerAuthRole:       poolerAuthRole,
@@ -257,6 +269,23 @@ func defaultPoolerAuthRole(e mimirv1alpha1.Engine) string {
 		return "_crunchypgbouncer"
 	}
 	return ""
+}
+
+// defaultAdminPasswordKey follows each operator's published Secret shape.
+//
+// Percona's Postgres operator writes <cluster>-pguser-<user> with `user` and
+// `password` keys, so "password" is right there. Percona's XtraDB operator
+// writes <cluster>-secrets keyed BY USERNAME, so the admin password for root
+// lives under "root" — and there is no "password" key at all. Defaulting per
+// engine keeps the common deployment zero-config instead of requiring two
+// overrides that are only discoverable by reading the operator's source.
+func defaultAdminPasswordKey(e mimirv1alpha1.Engine) string {
+	switch e {
+	case mimirv1alpha1.EngineMySQL:
+		return "root"
+	default:
+		return "password"
+	}
 }
 
 func defaultAdminDatabase(e mimirv1alpha1.Engine) string {

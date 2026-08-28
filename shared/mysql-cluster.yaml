@@ -1,0 +1,113 @@
+# The shared MySQL cluster.
+#
+# One cluster, many databases — vended by the DataService operator rather than
+# by a claim per app. See docs/plans/2026-08-17-dataservice-vending-design.md.
+#
+# Declared as a plain manifest for the same reason as the Postgres cluster: it
+# is infrastructure the platform owns, not something an app requests. A claim
+# would imply it could be provisioned more than once, which is exactly the
+# cluster-per-app model this replaces.
+apiVersion: pxc.percona.com/v1
+kind: PerconaXtraDBCluster
+metadata:
+  name: mimir-mysql
+  namespace: mimir
+spec:
+  crVersion: 1.19.0
+  # Required for pxc.size: 1. Galera is quorum-based and a one-node "cluster"
+  # has no quorum, so the operator refuses the configuration without this flag.
+  # See the size comment below for why the trade is taken deliberately.
+  allowUnsafeConfigurations: true
+  # The operator generates this Secret and keys it BY USERNAME — root, monitor,
+  # xtrabackup — rather than carrying `user`/`password` the way Percona's
+  # Postgres operator does. That is why the operator is pointed at it with
+  # MIMIR_MYSQL_ADMIN_USER=root and ADMIN_PASSWORD_KEY defaulting to "root".
+  secretsName: mimir-mysql-secrets
+
+  pxc:
+    # SINGLE NODE, and a stated limitation rather than an oversight — the same
+    # trade the shared Postgres cluster documents, and slightly sharper here:
+    # this is a single point of failure for every tenant on it, which is worse
+    # than the per-app clusters it replaces, where one failure cost one app.
+    # It also means the Galera replication that is PXC's entire reason for
+    # existing is not actually doing anything yet.
+    #
+    # Deliberate for now, on a platform being actively de-contended. Raising to
+    # 3 (Galera wants an odd number for quorum) is the fix, and it belongs with
+    # the offsite-backup work below — both are prerequisites before anything
+    # load-bearing depends on this cluster. Budget for it: three PXC nodes plus
+    # HAProxy is roughly 4GB against this one's ~1.3GB.
+    size: 1
+    image: percona/percona-xtradb-cluster:8.0.44-35.1
+    # Sized for the sum of its tenants plus connection overhead, in the same
+    # spirit as the Postgres cluster. Deliberately not BestEffort: a pod with a
+    # liveness probe and no requests is a restart loop under contention, and
+    # this one holds every tenant's data.
+    resources:
+      requests:
+        cpu: 250m
+        memory: 1Gi
+      limits:
+        cpu: "1"
+        memory: 2Gi
+    volumeSpec:
+      persistentVolumeClaim:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            # Matches the Postgres cluster's 10Gi for the same reasoning: well
+            # above current usage, and expandable on the storage classes this
+            # platform runs, so growing later is a one-line change rather than
+            # a migration.
+            storage: 10Gi
+    # No storageClassName, per the repo-wide rule: the cluster default is
+    # local-path on k3d, standard-rwo on GKE, Longhorn on homelab.
+
+  haproxy:
+    # The consumer endpoint. MIMIR_MYSQL_HOST points here while
+    # MIMIR_MYSQL_ADMIN_HOST may point at the same place — unlike Postgres,
+    # MySQL DDL is not transactional, so there is no pooler-in-transaction-mode
+    # problem forcing admin traffic to the primary.
+    enabled: true
+    size: 1
+    image: percona/haproxy:2.8.17
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 1Gi
+
+  backup:
+    image: percona/percona-xtradb-cluster-operator:1.19.0-pxc8.0-backup-pxb8.0.35
+    storages:
+      local:
+        type: filesystem
+        volume:
+          persistentVolumeClaim:
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                # Retention below keeps 3 fulls, and the peak is retention plus
+                # one: xtrabackup cannot expire the oldest until its replacement
+                # has completed. (3 + 1) x 10Gi = 40Gi, sized for incompressible
+                # data so the promise does not quietly fail for the tenant who
+                # stores encrypted blobs. Change data size, retention and this
+                # number together.
+                storage: 40Gi
+    schedule:
+      # Without a schedule the operator takes no backups at all — unlike
+      # pgBackRest, which at least takes one at creation and then goes stale.
+      # Silence here means no backup has ever run.
+      - name: daily
+        schedule: "0 1 * * *"
+        keep: 3
+        storageName: local
+  # NOTE: `local` is a PVC in this cluster. There is no offsite copy, so this
+  # survives a pod restart but not the loss of the cluster — the same exposure
+  # the Postgres cluster records, and consolidating concentrates it from one app
+  # onto all of them. An S3 storage against Garage is the fix and belongs with
+  # raising pxc.size above.
