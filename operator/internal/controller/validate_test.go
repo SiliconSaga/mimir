@@ -200,3 +200,59 @@ func TestSetReadyPreservesTransitionTime(t *testing.T) {
 		t.Error("status should have flipped to False")
 	}
 }
+
+// TestDatabaseToDropFallsBackToTheDerivedName covers the orphan window between
+// provisioning the server and recording what was provisioned.
+//
+// The interesting case is the middle one. Ensure writes an ownership row, an
+// account, a database and a grant before the controller records the name, so
+// any failure in that stretch leaves a real database behind with an empty
+// status. Reading the status field alone treated that as "nothing to do",
+// released the finalizer, and left the database on the shared cluster — where
+// its own ownership row then blocked the next request for that name.
+func TestDatabaseToDropFallsBackToTheDerivedName(t *testing.T) {
+	t.Run("recorded name wins", func(t *testing.T) {
+		d := ds(mimirv1alpha1.DataServiceSpec{Engine: mimirv1alpha1.EnginePostgres})
+		d.Status.ProvisionedDatabase = "recorded_name"
+		if got := databaseToDrop(d); got != "recorded_name" {
+			t.Errorf("databaseToDrop() = %q, want the recorded name", got)
+		}
+	})
+
+	t.Run("empty status still yields the derived name", func(t *testing.T) {
+		d := ds(mimirv1alpha1.DataServiceSpec{Engine: mimirv1alpha1.EnginePostgres})
+		want := d.ResolvedDatabaseName()
+		if want == "" {
+			t.Fatal("test fixture derives no database name")
+		}
+		if got := databaseToDrop(d); got != want {
+			t.Errorf("databaseToDrop() = %q, want the derived name %q", got, want)
+		}
+	})
+
+	t.Run("a name the provisioner would reject yields nothing to do", func(t *testing.T) {
+		// Drop validates the identifier and errors on a bad one, so returning
+		// this name would hold the finalizer forever on an object that never
+		// reached the server in the first place.
+		d := ds(mimirv1alpha1.DataServiceSpec{
+			Engine:       mimirv1alpha1.EnginePostgres,
+			DatabaseName: "not a valid identifier!",
+		})
+		if got := databaseToDrop(d); got != "" {
+			t.Errorf("databaseToDrop() = %q, want \"\" for an unprovisionable name", got)
+		}
+	})
+
+	t.Run("a recorded name is trusted even if the spec later changed", func(t *testing.T) {
+		// The status records what was actually created. If the spec's name is
+		// edited afterwards, the thing needing cleanup is still the old one.
+		d := ds(mimirv1alpha1.DataServiceSpec{
+			Engine:       mimirv1alpha1.EnginePostgres,
+			DatabaseName: "renamed_later",
+		})
+		d.Status.ProvisionedDatabase = "what_was_created"
+		if got := databaseToDrop(d); got != "what_was_created" {
+			t.Errorf("databaseToDrop() = %q, want the name that was actually created", got)
+		}
+	})
+}

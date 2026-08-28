@@ -531,8 +531,34 @@ func TestMySQLRefusesTheOperatorsOwnSchema(t *testing.T) {
 	if _, err := m.Ensure(ctx, tgt, ownerSchema, "", Options{Owner: "ns/app/uid-1"}); err == nil {
 		t.Fatal("Ensure provisioned the operator's own register schema as a tenant database")
 	}
-	if err := m.Drop(ctx, tgt, ownerSchema, "ns/app/uid-1"); err == nil {
-		t.Fatal("Drop accepted the operator's own register schema")
+
+	// Drop returns nil rather than an error, and the register survives.
+	//
+	// The error would be the louder assertion and it is the wrong one: Drop's
+	// contract is "remove it if it is ours", and it already returns nil for
+	// every other not-ours case. Erroring on the one name the operator is
+	// certain it must not touch held the finalizer on an object that never
+	// provisioned anything — a DataService named to derive this schema is
+	// refused by Ensure, so it has nothing on the server, and deleting it
+	// should not need a force annotation.
+	//
+	// What actually matters is the second assertion. "Returned nil" would also
+	// be satisfied by a Drop that cheerfully destroyed the ownership register
+	// for every tenant on the cluster, so the register is checked directly.
+	if err := m.Drop(ctx, tgt, ownerSchema, "ns/app/uid-1"); err != nil {
+		t.Fatalf("Drop on the operator's own schema should be a no-op, got: %v", err)
+	}
+
+	admin := mustAdminDB(t, tgt)
+	var present int
+	if err := admin.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM information_schema.tables
+		  WHERE table_schema = ? AND table_name = ?`, ownerSchema, ownerTable,
+	).Scan(&present); err != nil {
+		t.Fatalf("checking the register survived: %v", err)
+	}
+	if present != 1 {
+		t.Fatal("Drop destroyed the operator's ownership register")
 	}
 }
 
@@ -929,4 +955,212 @@ func readStatementCounters(ctx context.Context, t *testing.T, db *sql.DB, names 
 		out[name] = value
 	}
 	return out
+}
+
+// TestMySQLClaimDoesNotStealAFreeName covers the read-then-write window in the
+// ownership claim.
+//
+// Ensure reads the register, decides a name is free, and then writes — two
+// statements with a gap between them. Two DataServices asking for the same
+// unused name can both come through that gap, and the blind upsert this used to
+// do let the second one overwrite the first: both walked away believing they
+// owned the database, and only one of them did.
+//
+// The gap is simulated rather than raced, because a real race is not reliably
+// reproducible and a flaky test that proves nothing is worse than none. A
+// second owner claiming a name already recorded to somebody else is exactly the
+// state the losing goroutine finds itself in, and the claim has to refuse it.
+func TestMySQLClaimDoesNotStealAFreeName(t *testing.T) {
+	tgt := testMySQLTarget(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	m := MySQL{}
+	admin := mustAdminDB(t, tgt)
+	dbName := testMySQLDB(t, "claimrace")
+
+	if err := m.ensureOwnerRegister(ctx, admin); err != nil {
+		t.Fatalf("preparing the register: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = m.deleteOwnerMarker(ctx, admin, dbName)
+	})
+
+	// First claimant wins a genuinely free name. Not reclaimable: there is no
+	// row, which is the state the switch reports for an unused name.
+	if err := m.claimOwnerMarker(ctx, admin, dbName, "ns/first/uid-1", false); err != nil {
+		t.Fatalf("first claim on a free name: %v", err)
+	}
+
+	// Second claimant read the register before that landed, so it also believes
+	// the name is free. The row now says otherwise and must win.
+	err := m.claimOwnerMarker(ctx, admin, dbName, "ns/second/uid-2", false)
+	if err == nil {
+		t.Fatal("the second claim took a name already recorded to another owner")
+	}
+	var notOwned *ErrNotOwned
+	if !errors.As(err, &notOwned) {
+		t.Fatalf("second claim error = %v, want ErrNotOwned", err)
+	}
+	if notOwned.Got != "ns/first/uid-1" {
+		t.Errorf("conflict names holder %q, want the first claimant", notOwned.Got)
+	}
+
+	// And the register still records the winner rather than the last writer.
+	holder, err := m.databaseOwnerMarker(ctx, admin, dbName)
+	if err != nil {
+		t.Fatalf("reading the register: %v", err)
+	}
+	if holder != "ns/first/uid-1" {
+		t.Errorf("owner record = %q, want the first claimant to have survived", holder)
+	}
+
+	// The same owner reclaiming its own row is a no-op, not a conflict —
+	// otherwise every steady-state reconcile would fail.
+	if err := m.claimOwnerMarker(ctx, admin, dbName, "ns/first/uid-1", false); err != nil {
+		t.Fatalf("owner re-claiming its own record: %v", err)
+	}
+
+	// And a row the caller has established is reclaimable — recorded, but with
+	// no database behind it — still yields to a new owner. Without this the
+	// conditional write would strand names permanently.
+	if err := m.claimOwnerMarker(ctx, admin, dbName, "ns/second/uid-2", true); err != nil {
+		t.Fatalf("reclaiming a stale record: %v", err)
+	}
+	holder, err = m.databaseOwnerMarker(ctx, admin, dbName)
+	if err != nil {
+		t.Fatalf("reading the register: %v", err)
+	}
+	if holder != "ns/second/uid-2" {
+		t.Errorf("owner record = %q, want the reclaiming owner", holder)
+	}
+}
+
+// TestMySQLConflictLeavesNoOwnershipRow — a request that is about to be refused
+// must not record itself as the owner on the way out.
+//
+// Ensure used to write the marker before validating the derived account, so a
+// database name that was free but whose account belonged to somebody else left
+// a row claiming a database Ensure then declined to create. Harmless-looking,
+// and not: the register is what Drop consults, so the operator accumulated rows
+// for databases it had never made.
+func TestMySQLConflictLeavesNoOwnershipRow(t *testing.T) {
+	tgt := testMySQLTarget(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	m := MySQL{}
+	admin := mustAdminDB(t, tgt)
+	dbName := testMySQLDB(t, "noclaim")
+	user := mysqlUserName(dbName)
+
+	if err := m.ensureOwnerRegister(ctx, admin); err != nil {
+		t.Fatalf("preparing the register: %v", err)
+	}
+
+	// A foreign account occupying the name this database would derive. No
+	// ATTRIBUTE, so it reads as somebody else's however the marker is stored.
+	if _, err := admin.ExecContext(ctx, fmt.Sprintf("CREATE USER %s@%s IDENTIFIED BY %s",
+		quoteMySQLLiteral(user), quoteMySQLLiteral("%"), quoteMySQLLiteral("handmade")),
+	); err != nil {
+		t.Fatalf("planting a foreign account: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_, _ = admin.ExecContext(ctx, fmt.Sprintf("DROP USER IF EXISTS %s@%s",
+			quoteMySQLLiteral(user), quoteMySQLLiteral("%")))
+		_ = m.deleteOwnerMarker(ctx, admin, dbName)
+	})
+
+	_, err := m.Ensure(ctx, tgt, dbName, "", Options{Owner: "ns/app/uid-1"})
+	if err == nil {
+		t.Fatal("Ensure adopted a database whose account belongs to someone else")
+	}
+	var notOwned *ErrNotOwned
+	if !errors.As(err, &notOwned) {
+		t.Fatalf("Ensure error = %v, want ErrNotOwned", err)
+	}
+
+	// The point of the test: nothing was recorded.
+	holder, err := m.databaseOwnerMarker(ctx, admin, dbName)
+	if err != nil {
+		t.Fatalf("reading the register: %v", err)
+	}
+	if holder != "" {
+		t.Errorf("a refused request recorded itself as owner %q", holder)
+	}
+}
+
+// TestMySQLDropClearsTheRecordWhenTheAccountIsForeign — the database was ours
+// and is gone, so its row goes too, even though the account stays.
+//
+// Drop preserves an account it does not own, which is right. It used to return
+// early to do so, which skipped clearing the ownership row for a database it
+// had just successfully dropped: deletion reported success and left the
+// operator's own bookkeeping behind.
+func TestMySQLDropClearsTheRecordWhenTheAccountIsForeign(t *testing.T) {
+	tgt := testMySQLTarget(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	m := MySQL{}
+	admin := mustAdminDB(t, tgt)
+	dbName := testMySQLDB(t, "foreignacct")
+	owner := "ns/app/uid-1"
+	user := mysqlUserName(dbName)
+
+	if _, err := m.Ensure(ctx, tgt, dbName, "", Options{Owner: owner}); err != nil {
+		t.Fatalf("provisioning: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_, _ = admin.ExecContext(ctx, fmt.Sprintf("DROP USER IF EXISTS %s@%s",
+			quoteMySQLLiteral(user), quoteMySQLLiteral("%")))
+		_ = m.deleteOwnerMarker(ctx, admin, dbName)
+	})
+
+	// Repoint the account's marker at somebody else, leaving the database's own
+	// record ours. That is the split Drop has to handle: our database, not our
+	// account.
+	if _, err := admin.ExecContext(ctx, fmt.Sprintf("ALTER USER %s@%s ATTRIBUTE %s",
+		quoteMySQLLiteral(user), quoteMySQLLiteral("%"),
+		quoteMySQLLiteral(ownerAttributeJSON("ns/other/uid-9"))),
+	); err != nil {
+		t.Fatalf("repointing the account marker: %v", err)
+	}
+
+	if err := m.Drop(ctx, tgt, dbName, owner); err != nil {
+		t.Fatalf("dropping: %v", err)
+	}
+
+	// The database is gone.
+	exists, err := m.databaseExists(ctx, admin, dbName)
+	if err != nil {
+		t.Fatalf("checking the database: %v", err)
+	}
+	if exists {
+		t.Error("Drop left the database behind")
+	}
+
+	// The account is NOT, because it was not ours to remove.
+	stillThere, err := m.userExists(ctx, admin, user)
+	if err != nil {
+		t.Fatalf("checking the account: %v", err)
+	}
+	if !stillThere {
+		t.Error("Drop removed an account belonging to another owner")
+	}
+
+	// And the row is gone, which is the regression.
+	holder, err := m.databaseOwnerMarker(ctx, admin, dbName)
+	if err != nil {
+		t.Fatalf("reading the register: %v", err)
+	}
+	if holder != "" {
+		t.Errorf("Drop left ownership row %q behind for a database it deleted", holder)
+	}
 }

@@ -140,3 +140,82 @@ func contains(haystack, needle string) bool {
 	}
 	return false
 }
+
+// TestPostgresURIEscapesCredentials pins the escaping of the published URI.
+//
+// This string goes into a Secret and gets pasted into consumer config, so a
+// credential that survives the round trip only for the characters our own
+// generator happens to emit is not good enough. Generated tenant passwords are
+// base64url, which is exactly why this needs a test rather than a live check:
+// nothing we produce can reach the broken cases, so the bug stays invisible
+// until somebody supplies a password by hand.
+func TestPostgresURIEscapesCredentials(t *testing.T) {
+	tgt := Target{Host: "pg.example.svc", Port: 5432}
+
+	cases := []struct {
+		name     string
+		user     string
+		password string
+		want     string
+	}{
+		{
+			// The regression that started this. QueryEscape encodes a space as
+			// `+`, which means a space in a query string and a literal plus in
+			// userinfo — so the consumer would authenticate with the wrong
+			// password and get a bare "password authentication failed" with
+			// nothing pointing at the encoding.
+			name: "space becomes %20 rather than a plus",
+			user: "app", password: "two words",
+			want: "postgres://app:two%20words@pg.example.svc:5432/db?sslmode=disable",
+		},
+		{
+			// The complement: a real plus has to stay a plus. Encoding a space
+			// correctly is worth nothing if it costs the literal.
+			name: "literal plus survives",
+			user: "app", password: "a+b",
+			want: "postgres://app:a+b@pg.example.svc:5432/db?sslmode=disable",
+		},
+		{
+			// The failure that surfaced this area at all — the live admin
+			// password contains a colon, which unescaped turns
+			// `user:pass@host:port` into a parse error that quotes a fragment
+			// of the password back at you.
+			name: "colon cannot open a port",
+			user: "app", password: "pa:ss",
+			want: "postgres://app:pa%3Ass@pg.example.svc:5432/db?sslmode=disable",
+		},
+		{
+			// An unescaped @ ends userinfo early, so the rest of the password
+			// is read as the host.
+			name: "at sign cannot end userinfo",
+			user: "app", password: "p@ss",
+			want: "postgres://app:p%40ss@pg.example.svc:5432/db?sslmode=disable",
+		},
+		{
+			name: "the user half is escaped too",
+			user: "a b", password: "pw",
+			want: "postgres://a%20b:pw@pg.example.svc:5432/db?sslmode=disable",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := postgresURI(tgt, "db", tc.user, tc.password); got != tc.want {
+				t.Errorf("postgresURI() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPostgresURIBracketsIPv6Host guards the other half of the authority.
+//
+// An IPv6 literal's own colons are read as the port separator without brackets.
+// The host is whatever the platform is configured with rather than something
+// this code chooses, so it has to survive that.
+func TestPostgresURIBracketsIPv6Host(t *testing.T) {
+	tgt := Target{Host: "fd00::1", Port: 5432}
+	want := "postgres://app:pw@[fd00::1]:5432/db?sslmode=disable"
+	if got := postgresURI(tgt, "db", "app", "pw"); got != want {
+		t.Errorf("postgresURI() = %q, want %q", got, want)
+	}
+}

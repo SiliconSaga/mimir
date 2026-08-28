@@ -317,11 +317,7 @@ func (r *DataServiceReconciler) reconcileDelete(ctx context.Context, ds *mimirv1
 // caller's comment says it prevents, and the leftover name then blocks the
 // next request for it with an ownership conflict.
 func (r *DataServiceReconciler) dropShared(ctx context.Context, ds *mimirv1alpha1.DataService) error {
-	// Nothing was ever provisioned — a request that failed validation, or lost
-	// an ownership conflict before Ensure returned. There is no database of
-	// ours to drop, and guessing a name here is how the conflict-losing object
-	// would delete the winner's database.
-	db := ds.Status.ProvisionedDatabase
+	db := databaseToDrop(ds)
 	if db == "" {
 		return nil
 	}
@@ -342,6 +338,41 @@ func (r *DataServiceReconciler) dropShared(ctx context.Context, ds *mimirv1alpha
 	// The owner is passed so the provisioner refuses to drop a database that
 	// is not ours, even if the name matches.
 	return prov.Drop(ctx, target, db, ds.Owner())
+}
+
+// databaseToDrop picks the physical name to clean up, or "" for nothing to do.
+//
+// An empty status does NOT mean nothing was provisioned, which is the whole
+// reason this is not simply a field read. Ensure mutates the server in several
+// steps — ownership row, account, database, grant — and the controller records
+// the name only once all of them have succeeded. A failing grant, a write
+// timeout after CREATE DATABASE, or the status patch itself losing a conflict
+// each leave a real database behind with an empty status. Treating that as
+// "nothing to do" released the finalizer and orphaned it, which is precisely
+// what the deletion path exists to prevent.
+//
+// So it falls back to the derived name. Guessing is safe HERE, though it was
+// not always, and the distinction is worth stating plainly because the comment
+// this replaces argued the opposite: Drop is owner-guarded. It consults the
+// ownership marker and returns nil for a database recorded to another
+// DataService or standing unmarked, so a conflict-losing object calling this
+// cannot delete the winner's database — the marker is what stops it, and that
+// guard postdates the fear.
+//
+// A name the provisioner would reject outright yields "" instead. Drop
+// validates the identifier and errors on a bad one, and such a request never
+// reached the server at all, so there is genuinely nothing to clean up —
+// erroring would strand the finalizer on an object that never provisioned
+// anything.
+func databaseToDrop(ds *mimirv1alpha1.DataService) string {
+	if db := ds.Status.ProvisionedDatabase; db != "" {
+		return db
+	}
+	candidate := ds.ResolvedDatabaseName()
+	if engine.ValidateIdentifier(candidate) != nil {
+		return ""
+	}
+	return candidate
 }
 
 // resolveTarget reads the admin credentials for a shared cluster.

@@ -90,6 +90,11 @@ func (m MySQL) Ensure(ctx context.Context, t Target, database, current string, o
 		return creds, err
 	}
 
+	// reclaimable carries one bit out of the ownership switch: whether a row
+	// naming somebody else may legitimately be overwritten. It is consumed by
+	// the claim further down, which is deliberately NOT made here — see there.
+	reclaimable := false
+
 	if opts.Owner != "" {
 		owner, err := m.databaseOwnerMarker(ctx, db, database)
 		if err != nil {
@@ -106,6 +111,7 @@ func (m MySQL) Ensure(ctx context.Context, t Target, database, current string, o
 			// ownership and creating it. Neither leaves data to protect, so the
 			// name is free — refusing here would strand it permanently, needing
 			// a human to clear a row nobody can see.
+			reclaimable = true
 
 		case owner != "":
 			return creds, &ErrNotOwned{Database: database, Want: opts.Owner, Got: owner}
@@ -122,12 +128,6 @@ func (m MySQL) Ensure(ctx context.Context, t Target, database, current string, o
 			// needed the user's own marker as a fallback proof; moving the
 			// register admin-side closed the window instead of working around it.
 			return creds, &ErrNotOwned{Database: database, Want: opts.Owner, Got: ""}
-		}
-
-		// Recorded BEFORE the database is created. The reverse order is what
-		// produced the crash window described above.
-		if err := m.writeOwnerMarker(ctx, db, database, opts.Owner); err != nil {
-			return creds, err
 		}
 	}
 
@@ -164,6 +164,31 @@ func (m MySQL) Ensure(ctx context.Context, t Target, database, current string, o
 			// it as a Conflict.
 			return creds, fmt.Errorf("its MySQL account %q is not ours: %w",
 				user, &ErrNotOwned{Database: database, Want: opts.Owner, Got: marker})
+		}
+	}
+
+	// The claim lands HERE: after every ownership check, and still before the
+	// first mutation.
+	//
+	// Both halves of that matter. Writing it earlier — as this did — stamped
+	// our name on the register and only then discovered the derived account
+	// belonged to someone else, so a request that was about to be refused left
+	// a row behind claiming a database it would never create. Writing it later
+	// would reopen the crash window the register exists to close: a process
+	// that dies between CREATE DATABASE and recording ownership leaves an
+	// unmarked database, which the switch above can only read as somebody
+	// else's and refuse forever.
+	//
+	// claimOwnerMarker rather than a plain upsert because the switch's read and
+	// this write are not one operation. Two DataServices asking for the same
+	// free name can both read owner == "" and both write, and a blind upsert
+	// lets the second silently take the first's name. The conditional write
+	// refuses to replace a different owner unless the row is reclaimable, and
+	// reports back who actually holds it, so the loser gets a conflict instead
+	// of a database it does not own.
+	if opts.Owner != "" {
+		if err := m.claimOwnerMarker(ctx, db, database, opts.Owner, reclaimable); err != nil {
+			return creds, err
 		}
 	}
 
@@ -237,8 +262,14 @@ func (m MySQL) Drop(ctx context.Context, t Target, database, owner string) error
 	if err := ValidateIdentifier(database); err != nil {
 		return err
 	}
+	// Reserved, so it is not a tenant database and there is nothing of ours to
+	// drop — nil rather than the error Ensure returns. Drop's whole contract is
+	// "remove it if it is ours", and it already returns nil for every other
+	// not-ours case. Erroring here would hold the finalizer on an object that
+	// never provisioned anything, and it is the one name where the operator can
+	// be certain it must not touch what is there.
 	if database == ownerSchema {
-		return errReservedDatabase(database)
+		return nil
 	}
 	user := mysqlUserName(database)
 
@@ -298,7 +329,19 @@ func (m MySQL) Drop(ctx context.Context, t Target, database, owner string) error
 			return err
 		}
 		if marker != owner {
-			return nil
+			// The account is not ours, so leave it standing — but the DATABASE
+			// was ours and is now gone, so its row still has to go. Returning
+			// here (as this did) reported a successful deletion while leaving
+			// the operator's own bookkeeping behind, which is the exact drift
+			// the check at the top of this function calls out: a row whose
+			// database no longer exists makes the name look taken.
+			//
+			// It recovered eventually — Ensure treats a record with no database
+			// behind it as reclaimable — but "eventually, via a branch meant for
+			// crash recovery" is not the same as cleaning up after ourselves,
+			// and every one of these rows sits in the register until some
+			// unrelated tenant happens to ask for that name.
+			return m.deleteOwnerMarker(ctx, db, database)
 		}
 	}
 	if _, err := db.ExecContext(ctx,
@@ -390,17 +433,46 @@ func (m MySQL) ensureOwnerRegister(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-// writeOwnerMarker records ownership of a database in the operator's register.
+// claimOwnerMarker records ownership of a database, refusing to overwrite a
+// different owner unless the caller has established the row is reclaimable.
 //
 // Runs on the ADMIN connection, so no second connection to the tenant database
 // is needed — and, more to the point, the tenant has no grant that reaches this
-// row. Keyed by database name and upserted, so a reconcile is a no-op.
-func (m MySQL) writeOwnerMarker(ctx context.Context, db *sql.DB, database, owner string) error {
+// row. Keyed by database name, so a reconcile by the same owner is a no-op.
+//
+// The conditional UPDATE is what makes the claim atomic. The caller reads the
+// register, decides the name is available, and then writes — two statements,
+// with a window in between. A plain `ON DUPLICATE KEY UPDATE owner =
+// VALUES(owner)` closes that window in the worst possible way: whoever writes
+// second wins, so of two DataServices claiming the same free name, the one that
+// finishes provisioning first can have its record replaced by the other. Both
+// then believe they own the database, and only one of them is right.
+//
+// `IF(owner = VALUES(owner) OR ?, ...)` makes the row itself the arbiter. An
+// established owner survives unless it matches ours or the caller proved the
+// row is reclaimable — a record whose database no longer exists, which holds no
+// data worth protecting and would otherwise strand the name permanently.
+//
+// The follow-up SELECT is not redundant. MySQL reports zero affected rows both
+// when the update was rejected AND when it was a no-op write of an identical
+// value, so the row has to be read back to tell "somebody else holds this" from
+// "we already did". Reading it also makes the error name the actual holder.
+func (m MySQL) claimOwnerMarker(ctx context.Context, db *sql.DB, database, owner string, reclaimable bool) error {
 	if _, err := db.ExecContext(ctx, fmt.Sprintf(
-		"INSERT INTO %s.%s (database_name, owner) VALUES (?, ?) ON DUPLICATE KEY UPDATE owner = VALUES(owner)",
-		quoteMySQLIdentifier(ownerSchema), quoteMySQLIdentifier(ownerTable)), database, owner,
+		`INSERT INTO %s.%s (database_name, owner) VALUES (?, ?)
+		   ON DUPLICATE KEY UPDATE owner = IF(owner = VALUES(owner) OR ?, VALUES(owner), owner)`,
+		quoteMySQLIdentifier(ownerSchema), quoteMySQLIdentifier(ownerTable)),
+		database, owner, reclaimable,
 	); err != nil {
 		return fmt.Errorf("record owner of %q: %w", database, err)
+	}
+
+	holder, err := m.databaseOwnerMarker(ctx, db, database)
+	if err != nil {
+		return err
+	}
+	if holder != owner {
+		return &ErrNotOwned{Database: database, Want: owner, Got: holder}
 	}
 	return nil
 }

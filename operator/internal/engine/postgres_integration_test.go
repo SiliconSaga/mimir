@@ -184,12 +184,16 @@ func cleanup(t *testing.T, tgt Target, database string) {
 // nothing in either needs quoting. A real cluster's admin password does — the
 // live one contains a colon, which turns `user:pass@host:port` into a parse
 // error about an "invalid port", naming a fragment of the password in the
-// message. The provisioner has always escaped; only this harness did not, so
-// the tests could not be pointed at a real server without failing for a reason
-// that has nothing to do with the code.
+// message.
+//
+// url.UserPassword rather than QueryEscape per half, matching the provisioner:
+// QueryEscape encodes a space as `+`, which means a space only in a query
+// string. Userinfo reads `+` literally, so a credential with a space would be
+// silently corrupted. Escaping was never the missing piece — using the query
+// escaper for a userinfo component was.
 func pgURI(user, password, host string, port int32, database, sslmode string) string {
-	return fmt.Sprintf("postgres://%s:%s@%s/%s?sslmode=%s",
-		url.QueryEscape(user), url.QueryEscape(password),
+	return fmt.Sprintf("postgres://%s@%s/%s?sslmode=%s",
+		url.UserPassword(user, password).String(),
 		net.JoinHostPort(host, strconv.Itoa(int(port))), url.PathEscape(database),
 		sslmode)
 }
