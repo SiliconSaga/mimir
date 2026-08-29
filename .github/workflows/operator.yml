@@ -153,9 +153,14 @@ jobs:
       - uses: docker/setup-buildx-action@v3
       # No login and no tags: this proves the Dockerfile still builds, nothing
       # more. A broken build fails in review instead of on merge.
+      #
+      # Same platform list as publish. Building only one arch here would let an
+      # arch-specific break reach main and only surface at pod start on the
+      # other one — which is precisely how the amd64-only image shipped.
       - uses: docker/build-push-action@v6
         with:
           context: operator
+          platforms: linux/amd64,linux/arm64
           push: false
           cache-from: type=gha
 
@@ -204,9 +209,15 @@ jobs:
             type=raw,value=${{ steps.version.outputs.value }}
             type=raw,value=latest,enable={{is_default_branch}}
 
+      # Both architectures, because "runs on the cluster" is not one platform.
+      # GKE nodes are amd64; every Apple-Silicon k3d dev cluster is arm64. With
+      # no platforms: this step built only the runner's arch, and the failure
+      # landed far from the cause — `no match for platform in manifest` at pod
+      # start, on a tag that pulls fine on the machine that published it.
       - uses: docker/build-push-action@v6
         with:
           context: operator
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
