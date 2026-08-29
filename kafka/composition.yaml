@@ -39,7 +39,18 @@ spec:
       source: Inline
       inline:
         template: |
-          {{- $name := .observed.composite.resource.spec.claimRef.name }}
+          {{- /*
+            Claim name when there is a claim; the composite's own name otherwise.
+            Both are stable, and the fallback is not a lesser case: Crossplane
+            appends the random suffix only when it creates a composite FOR a
+            claim, so a directly-created XKafkaCluster already carries the name
+            its author chose. Without the guard a claimless composite renders
+            `<no value>` into every resource name.
+          */}}
+          {{- $name := .observed.composite.resource.metadata.name }}
+          {{- with .observed.composite.resource.spec.claimRef }}
+          {{- $name = .name }}
+          {{- end }}
           apiVersion: kubernetes.crossplane.io/v1alpha2
           kind: Object
           metadata:
@@ -90,7 +101,7 @@ spec:
           apiVersion: {{ .observed.composite.resource.apiVersion }}
           kind: {{ .observed.composite.resource.kind }}
           status:
-            bootstrapServers: {{ $name }}-kafka-bootstrap.kafka.svc.cluster.local:9092
+            bootstrapServers: {{ $name }}-kafka-bootstrap.kafka.svc:9092
 
   - step: deploy-kafka-node-pool
     functionRef:
@@ -101,7 +112,18 @@ spec:
       source: Inline
       inline:
         template: |
-          {{- $name := .observed.composite.resource.spec.claimRef.name }}
+          {{- /*
+            Claim name when there is a claim; the composite's own name otherwise.
+            Both are stable, and the fallback is not a lesser case: Crossplane
+            appends the random suffix only when it creates a composite FOR a
+            claim, so a directly-created XKafkaCluster already carries the name
+            its author chose. Without the guard a claimless composite renders
+            `<no value>` into every resource name.
+          */}}
+          {{- $name := .observed.composite.resource.metadata.name }}
+          {{- with .observed.composite.resource.spec.claimRef }}
+          {{- $name = .name }}
+          {{- end }}
           apiVersion: kubernetes.crossplane.io/v1alpha2
           kind: Object
           metadata:
