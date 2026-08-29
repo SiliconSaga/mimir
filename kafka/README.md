@@ -56,24 +56,24 @@ To verify the service works:
 
 3. **Connection Details**:
 
-   The bootstrap server address follows the pattern: `<composite-name>-kafka-bootstrap.kafka.svc:9092`
-
-   Get the bootstrap server:
+   Read the address off the claim — the composition publishes it, so there is nothing to assemble:
 
    ```bash
-   COMPOSITE_NAME=$(kubectl get kafkacluster kafka-test -n mimir -o jsonpath='{.spec.resourceRef.name}')
-   KAFKA_BOOTSTRAP="${COMPOSITE_NAME}-kafka-bootstrap.kafka.svc:9092"
-   echo $KAFKA_BOOTSTRAP
+   kubectl get kafkacluster kafka-test -n mimir -o jsonpath='{.status.bootstrapServers}'
    ```
+
+   It is also the `BOOTSTRAP` column of `kubectl get kafkaclusters`.
+
+   The address resolves to `<claim-name>-kafka-bootstrap.kafka.svc:9092`, because Strimzi resources are named after the claim. Prefer reading `status.bootstrapServers` anyway: it is the supported contract, whereas the pattern is an implementation detail. Do **not** derive the name from `spec.resourceRef.name` — that is the composite, which Crossplane suffixes randomly, and it is not what the cluster is called.
 
 ### Validation with Client
 
 To verify connectivity, exec into one of the Kafka broker pods:
 
 ```bash
-# Get composite name and broker pod (run all 3 lines)
-COMPOSITE_NAME=$(kubectl get kafkacluster kafka-test -n mimir -o jsonpath='{.spec.resourceRef.name}')
-KAFKA_POD=$(kubectl get pods -n kafka -l strimzi.io/cluster=$COMPOSITE_NAME,strimzi.io/broker-role=true -o jsonpath='{.items[0].metadata.name}')
+# The Strimzi cluster is named after the CLAIM, so the label selector is just
+# the claim name — no lookup needed (run both lines)
+KAFKA_POD=$(kubectl get pods -n kafka -l strimzi.io/cluster=kafka-test,strimzi.io/broker-role=true -o jsonpath='{.items[0].metadata.name}')
 echo "Using pod: $KAFKA_POD"
 
 # List topics
@@ -103,7 +103,7 @@ kubectl exec -n kafka $KAFKA_POD -- \
 
 External projects (like `Heimdall` or application projects) should treat this as a dependency.
 
-1. **Define Dependency**: In your project's Helm chart or configuration, reference the expected bootstrap URL pattern.
+1. **Define Dependency**: Read `status.bootstrapServers` off the claim rather than hardcoding an address. A committed manifest carrying a guessed cluster name is the failure this API exists to prevent — and a `KafkaTopic` whose `strimzi.io/cluster` label names a cluster that does not exist is silently ignored by Strimzi, so the mistake surfaces as missing topics with no error anywhere.
 2. **Network Policies**: Ensure your namespace allows egress to `kafka`.
 3. **Topics**: Use the Strimzi `KafkaTopic` CRD to create topics (managed by the Entity Operator).
 

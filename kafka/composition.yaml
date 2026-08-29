@@ -1,3 +1,23 @@
+# Strimzi resources are named from the CLAIM, not the composite.
+#
+# Crossplane derives a composite's name as <claim>-<random5>, so naming the
+# Kafka cluster after the composite made it unpredictable and different after
+# every teardown — `knarr-kafka-8r9tn` one time, `knarr-kafka-2wjjq` the next.
+# Consumers cannot reference that: a KafkaTopic labelled with a cluster name
+# that no longer exists is SILENTLY IGNORED by Strimzi, so a stale reference
+# produces no topics and no error. Knarr shipped two committed files carrying
+# a dead name for exactly this reason.
+#
+# spec.claimRef.name is stable for the life of the claim, so the cluster is now
+# deterministically named and its bootstrap address is knowable in advance.
+#
+# CONSTRAINT this introduces: every Kafka cluster lands in the shared `kafka`
+# namespace, so claim names must be unique ACROSS namespaces — two claims both
+# called `events` in different namespaces would now collide where the random
+# suffix used to hide it. Deliberate: one cluster per k8s cluster is the
+# current expectation, and a predictable name is worth more than protection
+# against a case that would itself be a naming mistake. Prefixing with the
+# claim namespace would remove the constraint at the cost of every name.
 apiVersion: apiextensions.crossplane.io/v1
 kind: Composition
 metadata:
@@ -19,10 +39,22 @@ spec:
       source: Inline
       inline:
         template: |
+          {{- /*
+            Claim name when there is a claim; the composite's own name otherwise.
+            Both are stable, and the fallback is not a lesser case: Crossplane
+            appends the random suffix only when it creates a composite FOR a
+            claim, so a directly-created XKafkaCluster already carries the name
+            its author chose. Without the guard a claimless composite renders
+            `<no value>` into every resource name.
+          */}}
+          {{- $name := .observed.composite.resource.metadata.name }}
+          {{- with .observed.composite.resource.spec.claimRef }}
+          {{- $name = .name }}
+          {{- end }}
           apiVersion: kubernetes.crossplane.io/v1alpha2
           kind: Object
           metadata:
-            name: {{ .observed.composite.resource.metadata.name }}-kafka
+            name: {{ $name }}-kafka
             annotations:
               gotemplating.fn.crossplane.io/composition-resource-name: kafka-cluster
           spec:
@@ -34,7 +66,7 @@ spec:
                 apiVersion: kafka.strimzi.io/v1beta2
                 kind: Kafka
                 metadata:
-                  name: {{ .observed.composite.resource.metadata.name }}
+                  name: {{ $name }}
                   namespace: kafka
                   annotations:
                     strimzi.io/kraft: "enabled"
@@ -60,6 +92,16 @@ spec:
                   entityOperator:
                     topicOperator: {}
                     userOperator: {}
+          ---
+          # Publish the bootstrap address the XRD has always advertised. It was
+          # declared in the XRD's status schema and never populated, so the
+          # BOOTSTRAP printer column rendered empty and every consumer had to
+          # reassemble the string by hand from a name it could not predict.
+          # Reading it from status is now the supported way to find the cluster.
+          apiVersion: {{ .observed.composite.resource.apiVersion }}
+          kind: {{ .observed.composite.resource.kind }}
+          status:
+            bootstrapServers: {{ $name }}-kafka-bootstrap.kafka.svc:9092
 
   - step: deploy-kafka-node-pool
     functionRef:
@@ -70,10 +112,22 @@ spec:
       source: Inline
       inline:
         template: |
+          {{- /*
+            Claim name when there is a claim; the composite's own name otherwise.
+            Both are stable, and the fallback is not a lesser case: Crossplane
+            appends the random suffix only when it creates a composite FOR a
+            claim, so a directly-created XKafkaCluster already carries the name
+            its author chose. Without the guard a claimless composite renders
+            `<no value>` into every resource name.
+          */}}
+          {{- $name := .observed.composite.resource.metadata.name }}
+          {{- with .observed.composite.resource.spec.claimRef }}
+          {{- $name = .name }}
+          {{- end }}
           apiVersion: kubernetes.crossplane.io/v1alpha2
           kind: Object
           metadata:
-            name: {{ .observed.composite.resource.metadata.name }}-nodepool
+            name: {{ $name }}-nodepool
             annotations:
               gotemplating.fn.crossplane.io/composition-resource-name: kafka-nodepool
           spec:
@@ -85,10 +139,10 @@ spec:
                 apiVersion: kafka.strimzi.io/v1beta2
                 kind: KafkaNodePool
                 metadata:
-                  name: {{ .observed.composite.resource.metadata.name }}-combined
+                  name: {{ $name }}-combined
                   namespace: kafka
                   labels:
-                    strimzi.io/cluster: {{ .observed.composite.resource.metadata.name }}
+                    strimzi.io/cluster: {{ $name }}
                 spec:
                   replicas: {{ .observed.composite.resource.spec.parameters.replicas }}
                   roles:
