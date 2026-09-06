@@ -13,6 +13,29 @@ metadata:
   name: mimir-postgres
   namespace: mimir
 spec:
+  # Propagated by the operator onto the objects it manages, including the
+  # `mimir-postgres-pgbackrest` ServiceAccount — which is the only way to
+  # annotate it, since the operator owns and would revert a direct edit.
+  #
+  # This is what makes `repo2-gcs-key-type: auto` work: pgBackRest asks the
+  # metadata server for a token as this GSA, so no service-account JSON is
+  # stored in the cluster.
+  #
+  # TWO of the KSAs it lands on genuinely need it, which is not obvious and cost
+  # a debugging round to find:
+  #
+  #   mimir-postgres-pgbackrest  the repo host — runs the backups themselves
+  #   mimir-postgres-instance    the Postgres pod — runs archive-push (every WAL
+  #                              segment goes to repo2 from here) and is where
+  #                              the operator execs stanza-create
+  #
+  # Binding only the first is a trap: `pgbackrest stanza-create` run by hand on
+  # the repo host succeeds, `pgbackrest info` reports repo2 healthy, and every
+  # scheduled backup still fails — because WAL never reaches GCS. Both KSAs need
+  # roles/iam.workloadIdentityUser on the GSA. See docs/offsite-backups.md.
+  metadata:
+    annotations:
+      iam.gke.io/gcp-service-account: pgbackrest@teralivekubernetes.iam.gserviceaccount.com
   image: "percona/percona-postgresql-operator:2.7.0-ppg15-postgres"
   imagePullPolicy: Always
   # Pinned at 15 to match every existing cluster, so the eventual rebuild of
@@ -97,6 +120,20 @@ spec:
       global:
         repo1-retention-full: "2"
         repo1-retention-full-type: count
+        # ── repo2: the offsite copy ──
+        # `auto` means pgBackRest authenticates via the metadata server rather
+        # than a key file, so there is no service-account JSON to store, rotate
+        # or leak. Same keyless Workload Identity pattern Velero uses on this
+        # cluster. The annotation comes from spec.metadata above; the IAM
+        # bindings that make it work are created out-of-band and documented in
+        # docs/offsite-backups.md — note that TWO KSAs need binding, not one.
+        repo2-gcs-key-type: auto
+        # Retention is deliberately LONGER offsite than locally. repo1 exists to
+        # make a fast restore cheap; repo2 exists for the case where the cluster
+        # or the zone is gone, and that is exactly when a two-week window is too
+        # short to be useful.
+        repo2-retention-full: "4"
+        repo2-retention-full-type: count
       repos:
         - name: repo1
           # Schedules are not optional here. pgBackRest takes an initial backup
@@ -134,13 +171,37 @@ spec:
                   # 20Gi data volume, which could not hold even one worst-case
                   # full. Change data size, retention and this number together.
                   storage: 40Gi
-      # NOTE: repo1 is a LOCAL PVC. There is no offsite copy, so this survives
-      # a pod restart but not the loss of the cluster. Deliberate for now and
-      # recorded rather than implied — see the design's "Deferred, with the
-      # risk stated". Consolidating concentrates that exposure: what used to
-      # cost one app its database now costs all of them. Mimir Phase 2 (an S3
-      # repo2 against Garage) is the fix, and Forgejo becoming load-bearing
-      # for GitOps is the moment it stops being optional.
+        # ── repo2: GCS, the copy that survives losing the cluster ──
+        # repo1 above is a local PVC: it survives a pod restart but not the loss
+        # of the cluster or the zone, and consolidating tenants onto one shared
+        # Postgres concentrates that exposure — what used to cost one app its
+        # database now costs all of them.
+        #
+        # The original plan was an S3 repo against Garage, which was blocked
+        # behind the garage-vs-seaweedfs decision. That blocker is gone: the
+        # platform now has a working GCS bucket and a proven keyless Workload
+        # Identity path from the Velero rollout, so this goes straight to GCS and
+        # needs no object-storage decision first.
+        #
+        # Deliberately NOT the Valheim shape (a scheduled job that copies files
+        # to a bucket). pgBackRest writes this repo itself, on its own schedule,
+        # and verifies what it wrote. A separate shipping job is a second
+        # scheduler that cannot see the first — which is precisely how the
+        # Valheim off-cluster uploads silently did nothing for months.
+        #
+        # Bucket is separate from the Velero bucket on purpose: different
+        # retention, different lifecycle, and a mistake in one cannot reach the
+        # other. Created out-of-band; see docs.
+        - name: repo2
+          gcs:
+            bucket: teralivekubernetes-pgbackrest
+          # Offset from repo1 by two hours. Both repos backing up the same
+          # database at the same instant means two pgBackRest processes
+          # competing for the same WAL and the same disk, on a cluster already
+          # tight on CPU requests.
+          schedules:
+            full: "0 3 * * 0"
+            differential: "0 3 * * 1-6"
 
   proxy:
     pgBouncer:
