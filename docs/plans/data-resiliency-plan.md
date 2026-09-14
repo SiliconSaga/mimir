@@ -3,16 +3,18 @@
 Created: 2026-02-10
 Status: Draft — awaiting approval
 
-> **⚠ STALE as of 2026-09-14 — kept for its design reasoning, not as a status report.**
+> **⚠ STALE as of 2026-09-14 — DO NOT FOLLOW AS A RECIPE.**
 >
-> The "Current State Assessment" below was written when this was greenfield and is now wrong in ways that matter. Verified against the live cluster:
+> Kept for the shape of its reasoning. Every concrete instruction, version and status claim below is unverified and at least one is actively harmful. Verified against the live cluster:
 >
-> - **"Nothing is live right now — no data to lose" is false.** XenForo runs on the shared MySQL cluster with a migrated forum: ~30k posts, ~35k users.
-> - **Velero is operational**, not "installed but not operational". It has run on GKE since 2026-09-01 against `gs://<project>-velero` with the native GCP plugin and Workload Identity, on a daily schedule with a 30-day TTL. The Garage/S3 shape described below applies to homelab only.
-> - **Longhorn was retired 2026-08-26.** Storage is the cluster default (`standard-rwo` on GKE).
-> - **MySQL backup is "None" again, but for a different reason.** One was configured on 2026-09-07 and disabled on 2026-09-14 after every run failed — see the comments in `shared/mysql-cluster.yaml`.
+> - **⚠ Phase 1.2's YAML caused a real incident.** It specifies `percona/percona-xtradb-cluster-operator:1.19.0-pxc8.0-backup`, a tag that has never existed — Percona stopped publishing per-version backup images after 1.17.0. Copying it in produced eight consecutive `ErrImagePull` failures, each of which still provisioned its per-run PVC, leaking 320Gi and exhausting the project's regional SSD quota. Take the current values from `shared/mysql-cluster.yaml`, never from here.
+> - **"Nothing is live right now — no data to lose" is false.** That is narrative prose a few lines below, not a table. XenForo runs on the shared MySQL cluster with a migrated forum: ~30k posts, ~35k users.
+> - **Velero is operational**, not "installed but not operational". It has run on GKE since 2026-09-01 against `gs://<project>-velero` with the native GCP plugin and Workload Identity, daily with a 30-day TTL.
+> - **Longhorn was retired 2026-08-26**, so the Goal's "Velero + Longhorn snapshots" and all of Phase 3.3 target infrastructure that no longer exists. On GKE the equivalent is Velero's native GCE persistent-disk snapshots (`NativeSnapshot`), already in use.
+> - **Garage is homelab-only.** Phase 2's S3 target does not apply to GKE, where offsite storage is GCS.
+> - **MySQL backup is "None" again**, for a new reason: configured 2026-09-07, disabled 2026-09-14 after every run failed. See `shared/mysql-cluster.yaml`.
 >
-> Treat the goal, the target SLA and the per-engine reasoning as live; treat every status table as history.
+> The goal and target SLA remain the right ambition; the mechanisms named in them do not all still exist.
 
 ## Goal
 
@@ -159,10 +161,13 @@ backup:
 **File**: `percona/MySQLComp.yaml`
 
 Add Percona XtraBackup configuration:
+
+> **⚠ DO NOT COPY THE BLOCK BELOW.** The image tag is invented — no `1.19.0-*-backup` image has ever been published — and copying it caused eight silent backup failures plus a 320Gi disk leak on 2026-09-14. The `filesystem` storage type also provisions a **new PVC per run** that `keep:` does not prune when a run fails. Use `shared/mysql-cluster.yaml` as the source of truth; it carries the corrected image and the reasons the schedule is currently disabled.
+
 ```yaml
 backup:
   enabled: true
-  image: percona/percona-xtradb-cluster-operator:1.19.0-pxc8.0-backup
+  image: percona/percona-xtradb-cluster-operator:1.19.0-pxc8.0-backup   # ⚠ NOT A REAL TAG
   storages:
     local-storage:
       type: filesystem

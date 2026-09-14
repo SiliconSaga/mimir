@@ -113,12 +113,16 @@ spec:
                 # ⚠ This size is PER BACKUP RUN, not a shared pool. `type:
                 # filesystem` provisions a NEW PVC of exactly this size for every
                 # backup the schedule fires — the operator does not reuse one
-                # volume and rotate inside it.
+                # volume and rotate inside it. It was 40Gi on the mistaken
+                # reading that retention shared one volume ("(3+1) x 10Gi"),
+                # which instead provisioned 40Gi PER DAY.
                 #
-                # 8Gi, sized against the 10Gi datadir. It was 40Gi on the
-                # mistaken reading that retention shared one volume ("(3+1) x
-                # 10Gi"), which instead provisioned 40Gi PER DAY.
-                storage: 8Gi
+                # 16Gi: this holds ONE full backup, so it must exceed the 10Gi
+                # datadir it copies, with margin. A target smaller than its
+                # source fails with ENOSPC once the data grows into it — and a
+                # failed run is exactly what leaks a PVC, so undersizing feeds
+                # the same problem it looks like it is avoiding.
+                storage: 16Gi
 
   # ── SCHEDULE DISABLED 2026-09-14 ──
   # Commented rather than deleted so the intended shape survives. Re-enable only
@@ -143,12 +147,25 @@ spec:
   #     kubectl -n mimir describe pod <that pod>
   # Do that first for any failing backup here, before tuning anything.
   #
-  # BEFORE RE-ENABLING:
+  # BEFORE RE-ENABLING — BOTH, not either:
   #   1. Run ONE manual PerconaXtraDBClusterBackup and confirm state=Succeeded.
   #      The 8.0.35-vs-8.0.44 skew noted on the image is still unproven.
-  #   2. Prefer S3 against Garage over `filesystem`. Object storage has no
-  #      per-run PVC, so a failed run cannot leak a disk — and it is the offsite
-  #      copy this lacks anyway.
+  #   2. Switch this storage from `filesystem` to `s3`. This is a REQUIREMENT,
+  #      not a preference: correcting the image removes the cause of these
+  #      failures but not the leak MECHANISM. `filesystem` provisions a PVC per
+  #      run and `keep:` prunes only successful backups, so any future transient
+  #      failure — ENOSPC, a node eviction, a bad credential — starts filling the
+  #      quota again. Object storage has no per-run PVC, so a failed run cannot
+  #      leak a disk.
+  #
+  #      Target the ENVIRONMENT's object store, not a fixed one: GCS on GKE
+  #      (where Velero already writes to gs://<project>-velero under Workload
+  #      Identity) and Garage on homelab. Garage is an in-cluster Service that
+  #      does not resolve on GKE — pointing this at it there yields a backup
+  #      that cannot connect and is not offsite anyway.
+  #
+  #      Until then, treat any manual backup as a one-off and delete its PVC
+  #      afterwards.
   #
   # schedule:
   #   - name: daily
@@ -159,8 +176,9 @@ spec:
   # NOTE: `local` is a PVC in this cluster. There is no offsite copy, so this
   # survives a pod restart but not the loss of the cluster — the same exposure
   # the Postgres cluster records, and consolidating concentrates it from one app
-  # onto all of them. An S3 storage against Garage is the fix and belongs with
-  # raising pxc.size above.
+  # onto all of them. An `s3` storage against the environment's object store
+  # (GCS on GKE, Garage on homelab) is the fix and belongs with raising pxc.size
+  # above.
   #
   # ⚠ The shared MySQL cluster therefore has NO engine-level backup today.
   #
