@@ -81,7 +81,26 @@ spec:
         memory: 1Gi
 
   backup:
-    image: percona/percona-xtradb-cluster-operator:1.19.0-pxc8.0-backup-pxb8.0.35
+    # ⚠ This tag does NOT track the operator version, and assuming it did is what
+    # broke every backup this cluster ever attempted.
+    #
+    # `1.19.0-pxc8.0-backup-pxb8.0.35` was written by pattern-matching the
+    # operator image (which really is 1.19.0). No such tag has ever existed:
+    # Percona stopped publishing per-version backup images after 1.17.0, so the
+    # 1.19.x line ships only `1.19.0` / `1.19.1` and their community bundles.
+    # Confirmed against the Docker Hub tag list on 2026-09-14.
+    #
+    # Check the tag exists before bumping it. The failure is invisible from the
+    # backup CR — see the schedule note below.
+    #
+    # ⚠ KNOWN SKEW, UNRESOLVED: this image carries xtrabackup 8.0.35 while
+    # pxc.image above is server 8.0.44. PXB is normally expected to be >= the
+    # server, and 8.0.35 is the newest 8.0-series build Percona publishes (the
+    # standalone percona/percona-xtrabackup repo tops out there too). So this
+    # may still fail — but it will now fail visibly, with an xtrabackup error
+    # rather than an unexplained deadline. Verify one manual backup before
+    # re-enabling the schedule.
+    image: percona/percona-xtradb-cluster-operator:1.17.0-pxc8.0-backup-pxb8.0.35
     storages:
       local:
         type: filesystem
@@ -91,23 +110,86 @@ spec:
               - ReadWriteOnce
             resources:
               requests:
-                # Retention below keeps 3 fulls, and the peak is retention plus
-                # one: xtrabackup cannot expire the oldest until its replacement
-                # has completed. (3 + 1) x 10Gi = 40Gi, sized for incompressible
-                # data so the promise does not quietly fail for the tenant who
-                # stores encrypted blobs. Change data size, retention and this
-                # number together.
-                storage: 40Gi
-    schedule:
-      # Without a schedule the operator takes no backups at all — unlike
-      # pgBackRest, which at least takes one at creation and then goes stale.
-      # Silence here means no backup has ever run.
-      - name: daily
-        schedule: "0 1 * * *"
-        keep: 3
-        storageName: local
+                # ⚠ This size is PER BACKUP RUN, not a shared pool. `type:
+                # filesystem` provisions a NEW PVC of exactly this size for every
+                # backup the schedule fires — the operator does not reuse one
+                # volume and rotate inside it. It was 40Gi on the mistaken
+                # reading that retention shared one volume ("(3+1) x 10Gi"),
+                # which instead provisioned 40Gi PER DAY.
+                #
+                # 16Gi: this holds ONE full backup, so it must exceed the 10Gi
+                # datadir it copies, with margin. A target smaller than its
+                # source fails with ENOSPC once the data grows into it — and a
+                # failed run is exactly what leaks a PVC, so undersizing feeds
+                # the same problem it looks like it is avoiding.
+                storage: 16Gi
+
+  # ── SCHEDULE DISABLED 2026-09-14 ──
+  # Commented rather than deleted so the intended shape survives. Re-enable only
+  # after a manual backup actually reaches Succeeded.
+  #
+  # WHAT HAPPENED: it ran daily from 09-07 to 09-14 and EVERY run failed on the
+  # bad image tag above, never starting xtrabackup at all. Each attempt still
+  # provisioned its 40Gi PVC first, and `keep: 3` prunes successful backups, not
+  # failed ones — so eight orphans reached 320Gi and took the regional
+  # SSD_TOTAL_GB quota to 976 of 1000. Past that nothing cluster-wide could
+  # provision a disk, and Velero surfaced it by going PartiallyFailed on the
+  # PVCs that could no longer bind. Worse than no backup: nothing restorable,
+  # and it consumed the quota everything else needed.
+  #
+  # ★ THE STATUS LIED, AND THAT IS THE DURABLE LESSON. The backup CR reported
+  # "running deadline seconds exceeded", which reads as xtrabackup being slow on
+  # a large dataset. It is really the operator timing out a job whose container
+  # never pulled. Nothing in the CR, and nothing in the operator log a day
+  # later, names the image. The cause is only visible in the backup POD's events
+  # while it exists:
+  #     kubectl -n mimir get pods -l percona.com/backup-name=<backup>
+  #     kubectl -n mimir describe pod <that pod>
+  # Do that first for any failing backup here, before tuning anything.
+  #
+  # BEFORE RE-ENABLING — BOTH, not either:
+  #   1. Run ONE manual PerconaXtraDBClusterBackup and confirm state=Succeeded.
+  #      The 8.0.35-vs-8.0.44 skew noted on the image is still unproven.
+  #   2. Switch this storage from `filesystem` to `s3`. This is a REQUIREMENT,
+  #      not a preference: correcting the image removes the cause of these
+  #      failures but not the leak MECHANISM. `filesystem` provisions a PVC per
+  #      run and `keep:` prunes only successful backups, so any future transient
+  #      failure — ENOSPC, a node eviction, a bad credential — starts filling the
+  #      quota again. Object storage has no per-run PVC, so a failed run cannot
+  #      leak a disk.
+  #
+  #      Target the ENVIRONMENT's object store, not a fixed one: GCS on GKE
+  #      (where Velero already writes to gs://<project>-velero under Workload
+  #      Identity) and Garage on homelab. Garage is an in-cluster Service that
+  #      does not resolve on GKE — pointing this at it there yields a backup
+  #      that cannot connect and is not offsite anyway.
+  #
+  #      Until then, treat any manual backup as a one-off and delete its PVC
+  #      afterwards.
+  #
+  # schedule:
+  #   - name: daily
+  #     schedule: "0 1 * * *"
+  #     keep: 3
+  #     storageName: local
+
   # NOTE: `local` is a PVC in this cluster. There is no offsite copy, so this
   # survives a pod restart but not the loss of the cluster — the same exposure
   # the Postgres cluster records, and consolidating concentrates it from one app
-  # onto all of them. An S3 storage against Garage is the fix and belongs with
-  # raising pxc.size above.
+  # onto all of them. An `s3` storage against the environment's object store
+  # (GCS on GKE, Garage on homelab) is the fix and belongs with raising pxc.size
+  # above.
+  #
+  # ⚠ The shared MySQL cluster therefore has NO engine-level backup today.
+  #
+  # Its only protection is Velero's nightly volume snapshot. That IS working —
+  # verified 2026-09-14 in velero-daily-full-20260914060008's volumeinfo:
+  # datadir-mimir-mysql-pxc-0, method NativeSnapshot, result succeeded. (An
+  # older claim that Velero is not operational survives in
+  # docs/plans/data-resiliency-plan.md; that document predates 2026-09-01 and is
+  # banner-marked stale.)
+  #
+  # But a volume snapshot of a live database is CRASH-consistent, not
+  # transaction-consistent — a disaster-recovery net, not a substitute for
+  # xtrabackup. Restoring one is equivalent to recovering from a power cut.
+  # Worth weighing before a second tenant joins XenForo here.
