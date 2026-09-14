@@ -3,6 +3,17 @@
 Created: 2026-02-10
 Status: Draft — awaiting approval
 
+> **⚠ STALE as of 2026-09-14 — kept for its design reasoning, not as a status report.**
+>
+> The "Current State Assessment" below was written when this was greenfield and is now wrong in ways that matter. Verified against the live cluster:
+>
+> - **"Nothing is live right now — no data to lose" is false.** XenForo runs on the shared MySQL cluster with a migrated forum: ~30k posts, ~35k users.
+> - **Velero is operational**, not "installed but not operational". It has run on GKE since 2026-09-01 against `gs://<project>-velero` with the native GCP plugin and Workload Identity, on a daily schedule with a 30-day TTL. The Garage/S3 shape described below applies to homelab only.
+> - **Longhorn was retired 2026-08-26.** Storage is the cluster default (`standard-rwo` on GKE).
+> - **MySQL backup is "None" again, but for a different reason.** One was configured on 2026-09-07 and disabled on 2026-09-14 after every run failed — see the comments in `shared/mysql-cluster.yaml`.
+>
+> Treat the goal, the target SLA and the per-engine reasoning as live; treat every status table as history.
+
 ## Goal
 
 Make Mimir's 5 data services production-ready with respect to backup, restore, and disaster recovery. Target SLA: recover from total cluster loss with less than 24 hours of data loss, using a combination of application-level backups (Percona/Strimzi-native) and infrastructure-level backups (Velero + Longhorn snapshots).
