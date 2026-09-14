@@ -91,23 +91,48 @@ spec:
               - ReadWriteOnce
             resources:
               requests:
-                # Retention below keeps 3 fulls, and the peak is retention plus
-                # one: xtrabackup cannot expire the oldest until its replacement
-                # has completed. (3 + 1) x 10Gi = 40Gi, sized for incompressible
-                # data so the promise does not quietly fail for the tenant who
-                # stores encrypted blobs. Change data size, retention and this
-                # number together.
-                storage: 40Gi
-    schedule:
-      # Without a schedule the operator takes no backups at all — unlike
-      # pgBackRest, which at least takes one at creation and then goes stale.
-      # Silence here means no backup has ever run.
-      - name: daily
-        schedule: "0 1 * * *"
-        keep: 3
-        storageName: local
+                # ⚠ This size is PER BACKUP RUN, not a shared pool. `type:
+                # filesystem` provisions a NEW PVC of exactly this size for every
+                # backup the schedule fires — the operator does not reuse one
+                # volume and rotate inside it.
+                #
+                # 8Gi, sized against the 10Gi datadir. It was 40Gi on the
+                # mistaken reading that retention shared one volume ("(3+1) x
+                # 10Gi"), which instead provisioned 40Gi PER DAY.
+                storage: 8Gi
+
+  # ── SCHEDULE DISABLED 2026-09-14 ──
+  # Re-enable only with the two prerequisites below. Commented rather than
+  # deleted so the intended shape survives.
+  #
+  # WHY: it ran daily from 09-07 to 09-14 and EVERY run failed ("running
+  # deadline seconds exceeded"), while each attempt still left its 40Gi PVC
+  # behind. `keep: 3` prunes successful backups, not failed ones. Eight orphans
+  # reached 320Gi and took the regional SSD_TOTAL_GB quota to 976 of 1000, after
+  # which no new disk could be provisioned cluster-wide — Velero went
+  # PartiallyFailed on the unbindable PVCs, which is how it surfaced. Worse than
+  # no backup: nothing restorable AND it consumed everyone else's quota.
+  #
+  # BEFORE RE-ENABLING:
+  #   1. Find why xtrabackup exceeds its deadline on a 10Gi datadir. A backup
+  #      that has never once succeeded is not a retention-tuning problem.
+  #   2. Move to S3 against Garage rather than `filesystem`. Object storage has
+  #      no per-run PVC, so a failed run cannot leak a disk — and it is the
+  #      offsite copy this lacks anyway.
+  #
+  # schedule:
+  #   - name: daily
+  #     schedule: "0 1 * * *"
+  #     keep: 3
+  #     storageName: local
+
   # NOTE: `local` is a PVC in this cluster. There is no offsite copy, so this
   # survives a pod restart but not the loss of the cluster — the same exposure
   # the Postgres cluster records, and consolidating concentrates it from one app
   # onto all of them. An S3 storage against Garage is the fix and belongs with
   # raising pxc.size above.
+  #
+  # ⚠ The shared MySQL cluster therefore has NO working backup today. Anything
+  # landing on it is protected only by Velero's nightly volume snapshot, which is
+  # crash-consistent rather than transaction-consistent. Worth knowing before a
+  # second tenant joins XenForo here.
