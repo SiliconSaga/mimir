@@ -81,26 +81,44 @@ spec:
         memory: 1Gi
 
   backup:
-    # ⚠ This tag does NOT track the operator version, and assuming it did is what
-    # broke every backup this cluster ever attempted.
+    # ⚠ The backup image does NOT live in the operator's repo, and assuming it
+    # did is what broke every backup this cluster ever attempted.
     #
-    # `1.19.0-pxc8.0-backup-pxb8.0.35` was written by pattern-matching the
-    # operator image (which really is 1.19.0). No such tag has ever existed:
-    # Percona stopped publishing per-version backup images after 1.17.0, so the
-    # 1.19.x line ships only `1.19.0` / `1.19.1` and their community bundles.
-    # Confirmed against the Docker Hub tag list on 2026-09-14.
+    # `percona-xtradb-cluster-operator:1.19.0-pxc8.0-backup-pxb8.0.35` was
+    # written by pattern-matching the operator version. No such tag exists —
+    # that repo's backup variants stop at 1.17.0. The first correction pinned
+    # 1.17.0 there; it pulled, then failed differently, and that second failure
+    # is the one worth carrying forward:
     #
-    # Check the tag exists before bumping it. The failure is invisible from the
-    # backup CR — see the schedule note below.
+    #     garbd: FATAL: unrecognised option '--extended-exit-codes'
     #
-    # ⚠ KNOWN SKEW, UNRESOLVED: this image carries xtrabackup 8.0.35 while
-    # pxc.image above is server 8.0.44. PXB is normally expected to be >= the
-    # server, and 8.0.35 is the newest 8.0-series build Percona publishes (the
-    # standalone percona/percona-xtrabackup repo tops out there too). So this
-    # may still fail — but it will now fail visibly, with an xtrabackup error
-    # rather than an unexplained deadline. Verify one manual backup before
-    # re-enabling the schedule.
-    image: percona/percona-xtradb-cluster-operator:1.17.0-pxc8.0-backup-pxb8.0.35
+    # THE BACKUP POD IS BUILT FROM TWO IMAGES. An init container from the
+    # OPERATOR image — 1.19.0, and NOT settable here — copies /opt/percona/backup/
+    # into the pod, run_backup.sh included. That script then drives the binaries
+    # from the image named below. Pin an old backup image and you get a new
+    # script calling flags an old garbd never had. The backup image is not free
+    # to lag the operator; it has to track it.
+    #
+    # Percona moved these images to the standalone `percona/percona-xtrabackup`
+    # repo as of operator 1.18.0 — which is why the operator repo looks like it
+    # simply stopped publishing them.
+    #
+    # ★ GET THE PAIRING FROM UPSTREAM, DO NOT INFER IT FROM THE TAGS. The tag
+    # suffixes are independent release counters, NOT a shared train: server
+    # 8.0.44-35.1 pairs with backup 8.0.35-34.1, and the matching `-35.1` on
+    # both sides of an earlier guess here was a coincidence that read like a
+    # rule. The operator publishes the tested set per release, one file:
+    #
+    #     https://raw.githubusercontent.com/percona/percona-xtradb-cluster-operator/v1.19.0/e2e-tests/release_versions
+    #
+    # At v1.19.0 that file reads IMAGE_PXC80=percona-xtradb-cluster:8.0.44-35.1
+    # (exactly the server above) and IMAGE_BACKUP80=percona-xtrabackup:8.0.35-34.1.
+    # Bump both together from that file, at the tag matching crVersion.
+    #
+    # ✓ RESOLVED: the "xtrabackup 8.0.35 vs server 8.0.44" skew flagged here
+    # earlier was a misreading. 8.0.35 is PXB's frozen base-MySQL version, not a
+    # lag behind the server, and Percona publishes no other 8.0-series build.
+    image: percona/percona-xtrabackup:8.0.35-34.1
     storages:
       local:
         type: filesystem
@@ -145,11 +163,15 @@ spec:
   # while it exists:
   #     kubectl -n mimir get pods -l percona.com/backup-name=<backup>
   #     kubectl -n mimir describe pod <that pod>
-  # Do that first for any failing backup here, before tuning anything.
+  #     kubectl -n mimir logs <that pod>
+  # Do that first for any failing backup here, before tuning anything. The CR
+  # sat at state=Running through the garbd failure too, while the pod behind it
+  # crash-looped — the CR state is not a verdict, the pod is. And the second
+  # failure was only ever visible in the pod's LOGS, not its events, so read
+  # both.
   #
   # BEFORE RE-ENABLING — BOTH, not either:
   #   1. Run ONE manual PerconaXtraDBClusterBackup and confirm state=Succeeded.
-  #      The 8.0.35-vs-8.0.44 skew noted on the image is still unproven.
   #   2. Switch this storage from `filesystem` to `s3`. This is a REQUIREMENT,
   #      not a preference: correcting the image removes the cause of these
   #      failures but not the leak MECHANISM. `filesystem` provisions a PVC per
@@ -157,6 +179,19 @@ spec:
   #      failure — ENOSPC, a node eviction, a bad credential — starts filling the
   #      quota again. Object storage has no per-run PVC, so a failed run cannot
   #      leak a disk.
+  #
+  #      ⚠ And the leak does NOT self-clean. Verified 2026-09-14: these PVCs
+  #      carry NO ownerReferences, so deleting the backup CR leaves the volume
+  #      behind — `kubectl delete pxc-backup` frees nothing. An earlier note
+  #      here said they cascaded. They do not.
+  #
+  #      Reclaim by hand, PODS FIRST. Deleting the backup CR also strands its
+  #      retry pods, and while any of them exists the `kubernetes.io/pvc-protection`
+  #      finalizer holds the PVC — so a `delete pvc` on its own just hangs,
+  #      looking like a stuck finalizer when it is really a live reference:
+  #          kubectl -n mimir delete pod -l percona.com/backup-name=<backup>
+  #          kubectl -n mimir get pvc            # xb-<backup-name>-<stamp>
+  #          kubectl -n mimir delete pvc <name>  # returns once the pods are gone
   #
   #      Target the ENVIRONMENT's object store, not a fixed one: GCS on GKE
   #      (where Velero already writes to gs://<project>-velero under Workload

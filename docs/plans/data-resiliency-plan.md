@@ -7,7 +7,7 @@ Status: Draft — awaiting approval
 >
 > Kept for the shape of its reasoning. Every concrete instruction, version and status claim below is unverified and at least one is actively harmful. Verified against the live cluster:
 >
-> - **⚠ Phase 1.2's YAML caused a real incident.** It specifies `percona/percona-xtradb-cluster-operator:1.19.0-pxc8.0-backup`, a tag that has never existed — Percona stopped publishing per-version backup images after 1.17.0. Copying it in produced eight consecutive `ErrImagePull` failures, each of which still provisioned its per-run PVC, leaking 320Gi and exhausting the project's regional SSD quota. Take the current values from `shared/mysql-cluster.yaml`, never from here.
+> - **⚠ Phase 1.2's YAML caused a real incident.** It specifies `percona/percona-xtradb-cluster-operator:1.19.0-pxc8.0-backup`, a tag that has never existed — as of operator 1.18.0 the backup images moved out of that repo entirely, to standalone `percona/percona-xtrabackup`. Copying it in produced eight consecutive `ErrImagePull` failures, each of which still provisioned its per-run PVC, leaking 320Gi and exhausting the project's regional SSD quota. Pinning the operator repo's last backup tag (`1.17.0-…`) is **not** the fix either: the backup pod's `run_backup.sh` is injected by an init container from the *operator* image, so an old backup image means a new script against an old `garbd`. Take the current values from `shared/mysql-cluster.yaml`, never from here.
 > - **"Nothing is live right now — no data to lose" is false.** That is narrative prose a few lines below, not a table. XenForo runs on the shared MySQL cluster with a migrated forum: ~30k posts, ~35k users.
 > - **Velero is operational**, not "installed but not operational". It has run on GKE since 2026-09-01 against `gs://<project>-velero` with the native GCP plugin and Workload Identity, daily with a 30-day TTL.
 > - **Longhorn was retired 2026-08-26**, so the Goal's "Velero + Longhorn snapshots" and all of Phase 3.3 target infrastructure that no longer exists. On GKE the equivalent is Velero's native GCE persistent-disk snapshots (`NativeSnapshot`), already in use.
@@ -162,7 +162,7 @@ backup:
 
 Add Percona XtraBackup configuration:
 
-> **⚠ DO NOT COPY THE BLOCK BELOW.** The image tag is invented — no `1.19.0-*-backup` image has ever been published — and copying it caused eight silent backup failures plus a 320Gi disk leak on 2026-09-14. The `filesystem` storage type also provisions a **new PVC per run** that `keep:` does not prune when a run fails. Use `shared/mysql-cluster.yaml` as the source of truth; it carries the corrected image and the reasons the schedule is currently disabled.
+> **⚠ DO NOT COPY THE BLOCK BELOW.** The image tag is invented — no `1.19.0-*-backup` image has ever been published, because the backup images moved to standalone `percona/percona-xtrabackup` at operator 1.18.0 — and copying it caused eight silent backup failures plus a 320Gi disk leak on 2026-09-14. Nor is the answer to reach back for the operator repo's last backup tag: the backup pod runs `run_backup.sh` copied in from the *operator* image, so the backup image has to track the operator, not lag it. The `filesystem` storage type also provisions a **new PVC per run** that `keep:` does not prune when a run fails, and that PVC has no ownerReferences, so it outlives the backup CR and must be deleted by hand. Use `shared/mysql-cluster.yaml` as the source of truth; it carries the corrected image and the reasons the schedule is currently disabled.
 
 ```yaml
 backup:
@@ -185,7 +185,7 @@ backup:
     storageName: local-storage
 ```
 
-**Note**: Need to verify exact image tag and YAML schema from Percona PXC operator docs. The backup image tag naming may follow the same chart-vs-image pattern we hit with PSMDB.
+**Note**: Need to verify exact image tag and YAML schema from Percona PXC operator docs. The backup image tag naming may follow the same chart-vs-image pattern we hit with PSMDB. *(2026-09-14: it was worse than that — the tag did not merely differ, the whole repo changed. Resolve it from `deploy/cr.yaml` at the operator's upstream git tag, which names the image the operator is actually built against.)*
 
 #### 1.3 PostgreSQL — Verify existing backups work
 pgBackRest is already configured with a local PVC. Verify:
