@@ -18,3 +18,8 @@ resources:
   # offsite backup storage are both still prerequisites before anything
   # load-bearing lands here — see the comments in mysql-cluster.yaml.
   - mysql-cluster.yaml
+  # The HMAC credential mysql-cluster.yaml's s3 storage reads. Listed after it
+  # for readability only — ESO and the PXC operator reconcile independently, so
+  # ordering here buys nothing. A backup firing before the Secret materializes
+  # fails and retries, it does not corrupt anything.
+  - mysql-backup-externalsecret.yaml

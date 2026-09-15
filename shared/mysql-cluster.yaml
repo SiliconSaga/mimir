@@ -120,27 +120,45 @@ spec:
     # lag behind the server, and Percona publishes no other 8.0-series build.
     image: percona/percona-xtrabackup:8.0.35-34.1
     storages:
-      local:
-        type: filesystem
-        volume:
-          persistentVolumeClaim:
-            accessModes:
-              - ReadWriteOnce
-            resources:
-              requests:
-                # ⚠ This size is PER BACKUP RUN, not a shared pool. `type:
-                # filesystem` provisions a NEW PVC of exactly this size for every
-                # backup the schedule fires — the operator does not reuse one
-                # volume and rotate inside it. It was 40Gi on the mistaken
-                # reading that retention shared one volume ("(3+1) x 10Gi"),
-                # which instead provisioned 40Gi PER DAY.
-                #
-                # 16Gi: this holds ONE full backup, so it must exceed the 10Gi
-                # datadir it copies, with margin. A target smaller than its
-                # source fails with ENOSPC once the data grows into it — and a
-                # failed run is exactly what leaks a PVC, so undersizing feeds
-                # the same problem it looks like it is avoiding.
-                storage: 16Gi
+      # ── gcs: object storage, and the ONLY storage defined here ──
+      # `filesystem` was removed rather than kept alongside this, which is a
+      # departure from the Postgres cluster's repo1-local + repo2-offsite shape
+      # next door. The reason is mechanical, not stylistic: pgBackRest reuses ONE
+      # volume and rotates retention inside it, so a local repo costs a fixed
+      # 40Gi. PXC's `filesystem` provisions a NEW PVC PER RUN and `keep:` prunes
+      # only successful backups, so a local tier here is a disk leak with a
+      # retention setting painted on it. That is not a hypothetical — it reached
+      # 320Gi of orphans and took the regional SSD quota to 976 of 1000. There is
+      # no safe way to keep a local tier on this operator, so there isn't one.
+      #
+      # ⚠ THIS IS GCS, REACHED OVER ITS S3-COMPATIBLE ENDPOINT, and that is not a
+      # workaround anyone should undo. The PXC operator supports exactly three
+      # storage types — filesystem, s3, azure. It has NO native GCS, unlike the
+      # Percona Postgres operator's `gcs:` repo with `gcs-key-type: auto` that
+      # postgres-cluster.yaml uses. So this is the one backup path on the
+      # platform that CANNOT use keyless Workload Identity: the S3 interop API
+      # authenticates with HMAC keys, which WI cannot issue. Replacing the
+      # credentialsSecret with a GSA annotation will 403 in xbcloud.
+      gcs:
+        type: s3
+        # Explicit rather than relying on the default, because a silent `false`
+        # here would put HMAC credentials on the wire unverified.
+        verifyTLS: true
+        s3:
+          bucket: teralivekubernetes-mysql-backups
+          # The S3-compatible front door for GCS. Without this, xbcloud talks to
+          # real AWS and fails in a way that reads like a credentials problem.
+          endpointUrl: https://storage.googleapis.com
+          # Matches the bucket's location. GCS ignores the S3 region for routing,
+          # but xbcloud signs the request with it, so a mismatch is a signature
+          # error rather than a helpful message.
+          region: us-east1
+          # HMAC key, materialized by ESO from OpenBao — see
+          # mysql-backup-externalsecret.yaml for why it is static, how narrowly
+          # the GSA is scoped, and the .env recovery copy. The operator requires
+          # the keys to be named AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
+          # regardless of which object store is behind them.
+          credentialsSecret: mimir-mysql-backup-s3
 
   # ── SCHEDULE DISABLED 2026-09-14 ──
   # Commented rather than deleted so the intended shape survives.
@@ -149,8 +167,20 @@ spec:
   # image percona-xtrabackup:8.0.35-34.1, and the artifact was checked rather
   # than trusted: 1.1G xtrabackup.stream, `md5sum -c` OK, and the backup's own
   # sst_info records mysql-version=8.0.44-35.1 — the server this cluster runs,
-  # which is the pairing confirmed end to end. Condition 2 below is still open,
-  # so the schedule stays off.
+  # which is the pairing confirmed end to end.
+  #
+  # ✓ CONDITION 2 STRUCTURALLY MET 2026-09-15: storage is now `s3` against GCS
+  # and the leaky `filesystem` tier is gone entirely.
+  #
+  # ⚠ STILL OFF, and on purpose — one gap remains. Condition 1 was proven against
+  # the OLD filesystem storage. No backup has yet succeeded against GCS, and the
+  # whole lesson of this block is that an untested backup path fails in ways the
+  # status does not admit. The HMAC/endpoint/signing chain is entirely new and
+  # unexercised. Re-enable only after a manual backup succeeds against `gcs` AND
+  # objects are confirmed in the bucket:
+  #     gcloud storage ls -r gs://teralivekubernetes-mysql-backups
+  # `Succeeded` without objects in the bucket is the exact failure shape this
+  # file exists to warn about.
   #
   # WHAT HAPPENED: it ran daily from 09-07 to 09-14 and EVERY run failed on the
   # bad image tag above, never starting xtrabackup at all. Each attempt still
@@ -180,18 +210,21 @@ spec:
   #   1. ✓ DONE 2026-09-15 — see the note at the top of this block. Do not take
   #      state=Succeeded on its own, given the above: mount the destination PVC
   #      read-only and confirm the artifact is really there.
-  #   2. Switch this storage from `filesystem` to `s3`. This is a REQUIREMENT,
-  #      not a preference: correcting the image removes the cause of these
-  #      failures but not the leak MECHANISM. `filesystem` provisions a PVC per
-  #      run and `keep:` prunes only successful backups, so any future transient
-  #      failure — ENOSPC, a node eviction, a bad credential — starts filling the
-  #      quota again. Object storage has no per-run PVC, so a failed run cannot
-  #      leak a disk.
+  #   2. ✓ DONE 2026-09-15 — `filesystem` is gone, storage is `s3` against GCS.
+  #      Kept in full below because the REASONING is what stops someone adding a
+  #      local tier back for "fast restores". It was a REQUIREMENT, not a
+  #      preference: correcting the image removed the cause of these failures but
+  #      not the leak MECHANISM. `filesystem` provisions a PVC per run and
+  #      `keep:` prunes only successful backups, so any future transient failure
+  #      — ENOSPC, a node eviction, a bad credential — starts filling the quota
+  #      again. Object storage has no per-run PVC, so a failed run cannot leak a
+  #      disk.
   #
-  #      ⚠ And the leak does NOT self-clean. Verified 2026-09-14: these PVCs
-  #      carry NO ownerReferences, so deleting the backup CR leaves the volume
-  #      behind — `kubectl delete pxc-backup` frees nothing. An earlier note
-  #      here said they cascaded. They do not.
+  #      ⚠ And the leak did NOT self-clean. Verified 2026-09-14: those PVCs
+  #      carried NO ownerReferences, so deleting the backup CR left the volume
+  #      behind — `kubectl delete pxc-backup` freed nothing. An earlier note
+  #      here said they cascaded. They did not. This is the part that made a
+  #      local tier untenable rather than merely untidy.
   #
   #      Reclaim by hand, PODS FIRST. Deleting the backup CR also strands its
   #      retry pods, and while any of them exists the `kubernetes.io/pvc-protection`
@@ -201,36 +234,36 @@ spec:
   #          kubectl -n mimir get pvc            # xb-<backup-name>-<stamp>
   #          kubectl -n mimir delete pvc <name>  # returns once the pods are gone
   #
-  #      Target the ENVIRONMENT's object store, not a fixed one: GCS on GKE
-  #      (where Velero already writes to gs://<project>-velero under Workload
-  #      Identity) and Garage on homelab. Garage is an in-cluster Service that
-  #      does not resolve on GKE — pointing this at it there yields a backup
-  #      that cannot connect and is not offsite anyway.
-  #
-  #      Until then, treat any manual backup as a one-off and delete its PVC
-  #      afterwards.
+  #      ⚠ HOMELAB IS NOT COVERED BY THIS. The bucket and endpoint above are
+  #      GKE-specific. Garage is the homelab object store, and it is an
+  #      in-cluster Service that does not resolve on GKE — so this cannot be one
+  #      fixed value for both. Today this manifest is GKE-shaped; running the
+  #      shared MySQL cluster on homelab needs the storage parameterised per
+  #      environment first, the way nordri patches velero-gke vs velero-homelab.
+  #      Left as a known limitation rather than a broken abstraction.
   #
   # schedule:
   #   - name: daily
   #     schedule: "0 1 * * *"
   #     keep: 3
-  #     storageName: local
+  #     storageName: gcs
 
-  # NOTE: `local` is a PVC in this cluster. There is no offsite copy, so this
-  # survives a pod restart but not the loss of the cluster — the same exposure
-  # the Postgres cluster records, and consolidating concentrates it from one app
-  # onto all of them. An `s3` storage against the environment's object store
-  # (GCS on GKE, Garage on homelab) is the fix and belongs with raising pxc.size
-  # above.
+  # NOTE: `gcs` is object storage OUTSIDE this cluster, so an engine-level backup
+  # now survives losing the cluster — the exposure the Postgres cluster records,
+  # and which consolidating every tenant onto one MySQL had concentrated from one
+  # app onto all of them. Bucket is separate from Velero's and pgBackRest's on
+  # purpose: different retention, different lifecycle, and a mistake in one
+  # cannot reach the others.
   #
-  # ⚠ The shared MySQL cluster therefore has NO engine-level backup today.
+  # ⚠ But NOTHING IS SCHEDULED YET — see the gate above. Until a backup succeeds
+  # against GCS and the schedule comes back, the only automatic protection this
+  # cluster has is still Velero's nightly volume snapshot.
   #
-  # Its only protection is Velero's nightly volume snapshot. That IS working —
-  # verified 2026-09-14 in velero-daily-full-20260914060008's volumeinfo:
-  # datadir-mimir-mysql-pxc-0, method NativeSnapshot, result succeeded. (An
-  # older claim that Velero is not operational survives in
-  # docs/plans/data-resiliency-plan.md; that document predates 2026-09-01 and is
-  # banner-marked stale.)
+  # That snapshot IS working — verified 2026-09-14 in
+  # velero-daily-full-20260914060008's volumeinfo: datadir-mimir-mysql-pxc-0,
+  # method NativeSnapshot, result succeeded. (An older claim that Velero is not
+  # operational survives in docs/plans/data-resiliency-plan.md; that document
+  # predates 2026-09-01 and is banner-marked stale.)
   #
   # But a volume snapshot of a live database is CRASH-consistent, not
   # transaction-consistent — a disaster-recovery net, not a substitute for
