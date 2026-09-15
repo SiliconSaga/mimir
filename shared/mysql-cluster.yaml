@@ -101,19 +101,24 @@ spec:
     #
     # Percona moved these images to the standalone `percona/percona-xtrabackup`
     # repo as of operator 1.18.0 — which is why the operator repo looks like it
-    # simply stopped publishing them. Confirmed against deploy/cr.yaml at
-    # upstream tag v1.19.0, which ships `percona/percona-xtrabackup:8.4.0-5.1`
-    # for its 8.4 default. 8.0.35-35.1 is the 8.0-series build from that same
-    # release train, pairing with the 8.0.44-35.1 server above — note the shared
-    # `-35.1`, which is the part that has to match.
+    # simply stopped publishing them.
+    #
+    # ★ GET THE PAIRING FROM UPSTREAM, DO NOT INFER IT FROM THE TAGS. The tag
+    # suffixes are independent release counters, NOT a shared train: server
+    # 8.0.44-35.1 pairs with backup 8.0.35-34.1, and the matching `-35.1` on
+    # both sides of an earlier guess here was a coincidence that read like a
+    # rule. The operator publishes the tested set per release, one file:
+    #
+    #     https://raw.githubusercontent.com/percona/percona-xtradb-cluster-operator/v1.19.0/e2e-tests/release_versions
+    #
+    # At v1.19.0 that file reads IMAGE_PXC80=percona-xtradb-cluster:8.0.44-35.1
+    # (exactly the server above) and IMAGE_BACKUP80=percona-xtrabackup:8.0.35-34.1.
+    # Bump both together from that file, at the tag matching crVersion.
     #
     # ✓ RESOLVED: the "xtrabackup 8.0.35 vs server 8.0.44" skew flagged here
     # earlier was a misreading. 8.0.35 is PXB's frozen base-MySQL version, not a
-    # lag behind the server — the release train is the `-35.1` suffix, and
-    # Percona publishes no other 8.0-series build. The image reports
-    # `xtrabackup version 8.0.35-35` and is what upstream certifies for this
-    # operator against an 8.0 server.
-    image: percona/percona-xtrabackup:8.0.35-35.1
+    # lag behind the server, and Percona publishes no other 8.0-series build.
+    image: percona/percona-xtrabackup:8.0.35-34.1
     storages:
       local:
         type: filesystem
@@ -177,11 +182,16 @@ spec:
   #
   #      ⚠ And the leak does NOT self-clean. Verified 2026-09-14: these PVCs
   #      carry NO ownerReferences, so deleting the backup CR leaves the volume
-  #      behind — `kubectl delete pxc-backup` frees nothing. Every failed run
-  #      has to be reclaimed BY HAND:
+  #      behind — `kubectl delete pxc-backup` frees nothing. An earlier note
+  #      here said they cascaded. They do not.
+  #
+  #      Reclaim by hand, PODS FIRST. Deleting the backup CR also strands its
+  #      retry pods, and while any of them exists the `kubernetes.io/pvc-protection`
+  #      finalizer holds the PVC — so a `delete pvc` on its own just hangs,
+  #      looking like a stuck finalizer when it is really a live reference:
+  #          kubectl -n mimir delete pod -l percona.com/backup-name=<backup>
   #          kubectl -n mimir get pvc            # xb-<backup-name>-<stamp>
-  #          kubectl -n mimir delete pvc <name>
-  #      An earlier note here said they cascaded. They do not.
+  #          kubectl -n mimir delete pvc <name>  # returns once the pods are gone
   #
   #      Target the ENVIRONMENT's object store, not a fixed one: GCS on GKE
   #      (where Velero already writes to gs://<project>-velero under Workload
