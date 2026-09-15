@@ -143,8 +143,14 @@ spec:
                 storage: 16Gi
 
   # ── SCHEDULE DISABLED 2026-09-14 ──
-  # Commented rather than deleted so the intended shape survives. Re-enable only
-  # after a manual backup actually reaches Succeeded.
+  # Commented rather than deleted so the intended shape survives.
+  #
+  # ✓ CONDITION 1 MET 2026-09-15. `manual-verify-2` reached state=Succeeded on
+  # image percona-xtrabackup:8.0.35-34.1, and the artifact was checked rather
+  # than trusted: 1.1G xtrabackup.stream, `md5sum -c` OK, and the backup's own
+  # sst_info records mysql-version=8.0.44-35.1 — the server this cluster runs,
+  # which is the pairing confirmed end to end. Condition 2 below is still open,
+  # so the schedule stays off.
   #
   # WHAT HAPPENED: it ran daily from 09-07 to 09-14 and EVERY run failed on the
   # bad image tag above, never starting xtrabackup at all. Each attempt still
@@ -171,7 +177,9 @@ spec:
   # both.
   #
   # BEFORE RE-ENABLING — BOTH, not either:
-  #   1. Run ONE manual PerconaXtraDBClusterBackup and confirm state=Succeeded.
+  #   1. ✓ DONE 2026-09-15 — see the note at the top of this block. Do not take
+  #      state=Succeeded on its own, given the above: mount the destination PVC
+  #      read-only and confirm the artifact is really there.
   #   2. Switch this storage from `filesystem` to `s3`. This is a REQUIREMENT,
   #      not a preference: correcting the image removes the cause of these
   #      failures but not the leak MECHANISM. `filesystem` provisions a PVC per
