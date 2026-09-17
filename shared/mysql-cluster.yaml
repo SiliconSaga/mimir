@@ -43,13 +43,27 @@ spec:
     # spirit as the Postgres cluster. Deliberately not BestEffort: a pod with a
     # liveness probe and no requests is a restart loop under contention, and
     # this one holds every tenant's data.
+    #
+    # Memory raised 2026-09-17 after measuring, not guessing: normal working set
+    # is ~1.8Gi (so the old 1Gi request under-reserved it by ~800Mi), and the
+    # first GCS backup peaked it at 1988Mi of a 2Gi limit. On a single node the
+    # xtrabackup donor runs INSIDE this container, on top of the buffer pool, so
+    # every backup lands here. That pressure made HAProxy's readiness check miss
+    # and briefly drop the Service — XenForo saw "Connection refused".
     resources:
       requests:
         cpu: 250m
-        memory: 1Gi
+        memory: 2Gi
       limits:
         cpu: "1"
-        memory: 2Gi
+        memory: 3Gi
+    # Pinned rather than auto-tuned. The operator sizes the buffer pool from the
+    # memory settings when this is absent (it chose 1G against a 2Gi limit), so
+    # raising the limit would grow the buffer pool and eat the headroom meant
+    # for the backup donor.
+    configuration: |
+      [mysqld]
+      innodb_buffer_pool_size = 1G
     volumeSpec:
       persistentVolumeClaim:
         accessModes:
@@ -79,6 +93,17 @@ spec:
       limits:
         cpu: 500m
         memory: 1Gi
+    # The operator default readiness timeout is 1s for an exec'd script that
+    # queries the PXC node. It failed 250 times in the cluster's first 10 days;
+    # three misses in a row pull HAProxy out of the Service, and with one replica
+    # that is an outage. 5s matches the liveness probe's own timeout. The other
+    # values restate the operator defaults so they survive the override.
+    readinessProbes:
+      initialDelaySeconds: 15
+      periodSeconds: 5
+      timeoutSeconds: 5
+      successThreshold: 1
+      failureThreshold: 3
 
   backup:
     # ⚠ The backup image does NOT live in the operator's repo, and assuming it
