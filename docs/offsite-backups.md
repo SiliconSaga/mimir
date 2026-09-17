@@ -7,7 +7,7 @@ difference is not a style choice — see
 | Cluster | Off-site target | Auth | Scheduled? |
 | --- | --- | --- | --- |
 | Postgres | `gs://teralivekubernetes-pgbackrest` | Workload Identity, keyless | yes, weekly full |
-| MySQL | `gs://teralivekubernetes-mysql-backups` | **HMAC key** via S3 interop | **not yet** — see gate |
+| MySQL | `gs://teralivekubernetes-mysql-backups` | **HMAC key** via S3 interop | yes, daily 02:00, keep 7 |
 
 ## Offsite backups for the shared Postgres cluster
 
@@ -225,7 +225,3 @@ block in `shared/mysql-cluster.yaml`.
 - **A restore drill.** Neither Postgres repo has been restored from, and neither
   has MySQL. Until that happens this is an untested backup, which is the only
   kind that fails when it matters.
-- **The MySQL schedule is still disabled.** The GCS path has not yet produced a
-  successful backup, so nothing runs automatically. Its only automatic protection
-  remains Velero's nightly volume snapshot, which is crash-consistent, not
-  transaction-consistent.

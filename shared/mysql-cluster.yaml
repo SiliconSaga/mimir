@@ -160,27 +160,23 @@ spec:
           # regardless of which object store is behind them.
           credentialsSecret: mimir-mysql-backup-s3
 
-  # ── SCHEDULE DISABLED 2026-09-14 ──
-  # Commented rather than deleted so the intended shape survives.
+  # ── SCHEDULE RE-ENABLED 2026-09-16, after being off since 2026-09-14 ──
   #
-  # ✓ CONDITION 1 MET 2026-09-15. `manual-verify-2` reached state=Succeeded on
-  # image percona-xtrabackup:8.0.35-34.1, and the artifact was checked rather
-  # than trusted: 1.1G xtrabackup.stream, `md5sum -c` OK, and the backup's own
-  # sst_info records mysql-version=8.0.44-35.1 — the server this cluster runs,
-  # which is the pairing confirmed end to end.
-  #
-  # ✓ CONDITION 2 STRUCTURALLY MET 2026-09-15: storage is now `s3` against GCS
-  # and the leaky `filesystem` tier is gone entirely.
-  #
-  # ⚠ STILL OFF, and on purpose — one gap remains. Condition 1 was proven against
-  # the OLD filesystem storage. No backup has yet succeeded against GCS, and the
-  # whole lesson of this block is that an untested backup path fails in ways the
-  # status does not admit. The HMAC/endpoint/signing chain is entirely new and
-  # unexercised. Re-enable only after a manual backup succeeds against `gcs` AND
-  # objects are confirmed in the bucket:
+  # Re-enabled only once a backup was proven against the storage it will
+  # actually use: `gcs-verify-1` reached Succeeded on 2026-09-16 AND its objects
+  # were confirmed in the bucket — 1,203,090,161 bytes under
+  # mimir-mysql-2026-09-16-19:14:20-full/, within ~9 KB of the 1.1G local stream
+  # verified the day before, with no per-run PVC created. `Succeeded` without
+  # objects in the bucket is the failure shape to keep checking for:
   #     gcloud storage ls -r gs://teralivekubernetes-mysql-backups
-  # `Succeeded` without objects in the bucket is the exact failure shape this
-  # file exists to warn about.
+  #
+  # 02:00 sits between pgBackRest repo1 (01:00) and repo2 (03:00), ahead of the
+  # XenForo dump (03:20) and Velero (06:00), so no two backups share a slot on a
+  # cluster already tight on CPU requests. keep: 7 is a week of dailies; in GCS
+  # `keep` prunes objects, not disks, and ~1.1G a day costs cents.
+  #
+  # The history below stays because it explains the storage and image choices
+  # above, and the debugging order for the next failure.
   #
   # WHAT HAPPENED: it ran daily from 09-07 to 09-14 and EVERY run failed on the
   # bad image tag above, never starting xtrabackup at all. Each attempt still
@@ -242,11 +238,11 @@ spec:
   #      environment first, the way nordri patches velero-gke vs velero-homelab.
   #      Left as a known limitation rather than a broken abstraction.
   #
-  # schedule:
-  #   - name: daily
-  #     schedule: "0 1 * * *"
-  #     keep: 3
-  #     storageName: gcs
+    schedule:
+      - name: daily
+        schedule: "0 2 * * *"
+        keep: 7
+        storageName: gcs
 
   # NOTE: `gcs` is object storage OUTSIDE this cluster, so an engine-level backup
   # now survives losing the cluster — the exposure the Postgres cluster records,
@@ -255,11 +251,8 @@ spec:
   # purpose: different retention, different lifecycle, and a mistake in one
   # cannot reach the others.
   #
-  # ⚠ But NOTHING IS SCHEDULED YET — see the gate above. Until a backup succeeds
-  # against GCS and the schedule comes back, the only automatic protection this
-  # cluster has is still Velero's nightly volume snapshot.
-  #
-  # That snapshot IS working — verified 2026-09-14 in
+  # Velero's nightly volume snapshot remains a second, independent layer. It IS
+  # working — verified 2026-09-14 in
   # velero-daily-full-20260914060008's volumeinfo: datadir-mimir-mysql-pxc-0,
   # method NativeSnapshot, result succeeded. (An older claim that Velero is not
   # operational survives in docs/plans/data-resiliency-plan.md; that document
