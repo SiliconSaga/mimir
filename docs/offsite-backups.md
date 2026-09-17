@@ -217,8 +217,8 @@ YAML
 ```
 
 If it fails, read the backup **pod's logs**, not the CR status — the CR sat at
-`Running` through a hard `garbd` failure once already. See the schedule-disabled
-block in `shared/mysql-cluster.yaml`.
+`Running` through a hard `garbd` failure once already. The debugging order is in
+the "THE STATUS LIED" notes beside the schedule in `shared/mysql-cluster.yaml`.
 
 ## Still owed
 
