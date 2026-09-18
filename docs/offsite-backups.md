@@ -144,8 +144,10 @@ something Workload Identity cannot issue. Replacing `credentialsSecret` with an
 Blast radius is bounded instead of eliminated: the GSA `mysql-backup@…` holds
 `roles/storage.objectAdmin` on that one bucket and nothing else. The key lives in
 OpenBao at `secret/mimir-mysql-backup`, materialized by ESO into
-`mimir-mysql-backup-s3`, with a recovery copy in the workspace `.env` because
-OpenBao runs the manual Shamir seal posture. Full reasoning in
+`mimir-mysql-backup-s3`, with a recovery copy in the workspace `.env` from the
+days when OpenBao ran the manual Shamir posture. Since 2026-09-17 OpenBao on
+GKE auto-unseals through Cloud KMS and is itself snapshotted daily to GCS, so
+the `.env` copy is a convenience, not the custody. Full reasoning in
 `nidavellir/docs/secrets-management.md`.
 
 The operator insists the Secret keys be named `AWS_ACCESS_KEY_ID` and
