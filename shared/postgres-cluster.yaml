@@ -87,20 +87,22 @@ spec:
   backups:
     enabled: true
     # Off: nothing here reads latestRestorableTime, and point-in-time restore
-    # works without it — it is a status convenience. On, it runs a WAL watcher
-    # that re-reconciles the cluster every 10s and execs into the primary each
-    # time.
+    # works without it — it is a status convenience, and on operator 2.x it is
+    # an expensive one.
     #
-    # It does NOT stop the larger cost, which is an operator 2.x bug
-    # (K8SPG-1113, fixed in 3.1.0): every Succeeded PerconaPGBackup is stamped
-    # with the newest commit timestamp, the status change re-queues it, and each
-    # reconcile execs `pgbackrest info` into the primary. With WAL archived every
-    # minute that loop never settles, and its cost scales with the NUMBER OF
-    # BACKUP CRs. At 36 CRs it held the primary at ~0.7 cores against a 1-core
-    # limit, throttled the pod and starved the pgBackRest sidecar's 1s liveness
-    # probe into 63 restarts. Hence the tight retention below: the operator
-    # deletes a CR once pgBackRest expires its backup, so retention is what
-    # bounds the CR count until the operator is upgraded.
+    # On, a WAL watcher stamps the newest commit timestamp every 10s, and a 2.x
+    # bug (K8SPG-1113, fixed in 3.1.0) spreads that stamp to EVERY Succeeded
+    # PerconaPGBackup. Each status change re-queues its backup, and each
+    # reconcile execs `pgbackrest info` into the primary. With WAL archived
+    # every minute the loop never settles, and its cost scales with the number
+    # of backup CRs: at 36 it held the primary at ~0.7 cores of its 1-core
+    # limit, throttled the pod, and starved the pgBackRest sidecar's 1s
+    # liveness probe into 63 restarts. Turning this off stopped the loop within
+    # four minutes, and the primary dropped to ~0.07 cores.
+    #
+    # Anything that still touches every backup (an operator restart, a resync)
+    # pays one exec pair per CR, which is why retention below is kept tight:
+    # the operator deletes a CR once pgBackRest expires its backup.
     trackLatestRestorableTime: false
     pgbackrest:
       # pgBackRest ships in its OWN repository, not as a suffixed tag on the
@@ -131,8 +133,9 @@ spec:
       # failure mode that stays invisible until a restore is attempted.
       #
       # Deliberately few. Each retained backup is also a PerconaPGBackup CR the
-      # operator keeps reconciling (see trackLatestRestorableTime above), so
-      # retention is a CPU budget on the primary as well as a disk budget.
+      # operator reconciles with an exec into the primary (see
+      # trackLatestRestorableTime above), so retention is a CPU budget as well
+      # as a disk budget.
       #
       # Differentials are capped separately. Point-in-time recovery reaches
       # back to the oldest retained full either way, because archived WAL is
