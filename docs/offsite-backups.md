@@ -16,8 +16,8 @@ repositories:
 
 | Repo | Where | Why |
 | --- | --- | --- |
-| `repo1` | 40Gi PVC in-cluster | fast restore, cheap. 2 weekly fulls. |
-| `repo2` | `gs://teralivekubernetes-pgbackrest` | survives losing the cluster or the zone. 4 weekly fulls. |
+| `repo1` | 40Gi PVC in-cluster | fast restore, cheap. 1 weekly full + the latest diff; point-in-time recovery back 0–7 days. |
+| `repo2` | `gs://teralivekubernetes-pgbackrest` | survives losing the cluster or the zone. 2 weekly fulls + 3 diffs; point-in-time recovery back 7–14 days. |
 
 repo1 alone is not a backup story. Consolidating every tenant onto one shared
 Postgres concentrates the blast radius: what used to cost one app its database

@@ -142,12 +142,14 @@ spec:
       # kept for as long as that full is; older diffs only make a restore to
       # an older point faster, which is not worth a CR apiece.
       #
-      # repo1 is the fast local restore: this week's full plus its latest
-      # diffs. A second local full adds nothing repo2 does not already hold.
+      # repo1 is the fast local restore: this week's full plus the latest diff,
+      # so point-in-time recovery reaches back 0–7 days locally. A second local
+      # full adds nothing repo2 does not already hold. One diff, not more,
+      # because the volume below is sized for it.
       global:
         repo1-retention-full: "1"
         repo1-retention-full-type: count
-        repo1-retention-diff: "3"
+        repo1-retention-diff: "1"
         # ── repo2: the offsite copy ──
         # `auto` means pgBackRest authenticates via the metadata server rather
         # than a key file, so there is no service-account JSON to store, rotate
@@ -158,8 +160,9 @@ spec:
         repo2-gcs-key-type: auto
         # Retention is deliberately LONGER offsite than locally. repo1 exists to
         # make a fast restore cheap; repo2 exists for the case where the cluster
-        # or the zone is gone. Two weekly fulls give a fortnight of
-        # point-in-time recovery from GCS.
+        # or the zone is gone. Two weekly fulls give point-in-time recovery
+        # from GCS reaching back 7–14 days: the oldest full is a week old just
+        # after a new one lands, and two weeks old just before.
         repo2-retention-full: "2"
         repo2-retention-full-type: count
         repo2-retention-diff: "3"
@@ -181,17 +184,18 @@ spec:
                   # Derived, not guessed — and the peak is RETENTION PLUS ONE.
                   # pgBackRest cannot expire the oldest retained full until its
                   # replacement has completed successfully, so the moment before
-                  # expiry the repo holds two fulls, not one. Budgeting for one
-                  # is how the weekly backup fails partway through the second:
+                  # expiry the repo holds two fulls, not one, plus the retained
+                  # diff. A diff can be as large as a full when every page has
+                  # changed, so it is budgeted as one:
                   #
                   #   (1 retained + 1 in flight) x 10Gi = 20Gi   zero compression
-                  #   + differentials and WAL                    ~10Gi headroom
+                  #   + 1 retained diff at full size      = 10Gi
+                  #   + WAL                                ~10Gi headroom
                   #   -------------------------------------------------------
-                  #                                               30Gi
+                  #                                               40Gi
                   #
-                  # Provisioned at 40Gi, which leaves room to grow the data
-                  # volume to 15Gi without touching this — and a PVC cannot be
-                  # shrunk, so it stays.
+                  # This is also why repo1 keeps one diff: each extra one is
+                  # another 10Gi at worst.
                   #
                   # Deliberately sized for INCOMPRESSIBLE data. pgBackRest
                   # compresses, and real Postgres content compresses well, but a
