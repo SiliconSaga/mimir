@@ -86,6 +86,24 @@ spec:
 
   backups:
     enabled: true
+    # Off: nothing here reads latestRestorableTime, and point-in-time restore
+    # works without it — it is a status convenience, and on operator 2.x it is
+    # an expensive one.
+    #
+    # On, a WAL watcher stamps the newest commit timestamp every 10s, and a 2.x
+    # bug (K8SPG-1113, fixed in 3.1.0) spreads that stamp to EVERY Succeeded
+    # PerconaPGBackup. Each status change re-queues its backup, and each
+    # reconcile execs `pgbackrest info` into the primary. With WAL archived
+    # every minute the loop never settles, and its cost scales with the number
+    # of backup CRs: at 36 it held the primary at ~0.7 cores of its 1-core
+    # limit, throttled the pod, and starved the pgBackRest sidecar's 1s
+    # liveness probe into 63 restarts. Turning this off stopped the loop within
+    # four minutes, and the primary dropped to ~0.07 cores.
+    #
+    # Anything that still touches every backup (an operator restart, a resync)
+    # pays one exec pair per CR, which is why retention below is kept tight:
+    # the operator deletes a CR once pgBackRest expires its backup.
+    trackLatestRestorableTime: false
     pgbackrest:
       # pgBackRest ships in its OWN repository, not as a suffixed tag on the
       # operator repo. This previously pointed at the PostgreSQL *server*
@@ -114,12 +132,24 @@ spec:
       # until the volume fills, at which point backups start failing — the
       # failure mode that stays invisible until a restore is attempted.
       #
-      # 2 weekly fulls, so a fortnight of history. Fewer than the 4 first
-      # written here, because 4 was aspirational rather than affordable: see
-      # the arithmetic on repo1 below.
+      # Deliberately few. Each retained backup is also a PerconaPGBackup CR the
+      # operator reconciles with an exec into the primary (see
+      # trackLatestRestorableTime above), so retention is a CPU budget as well
+      # as a disk budget.
+      #
+      # Differentials are capped separately. Point-in-time recovery reaches
+      # back to the oldest retained full either way, because archived WAL is
+      # kept for as long as that full is; older diffs only make a restore to
+      # an older point faster, which is not worth a CR apiece.
+      #
+      # repo1 is the fast local restore: this week's full plus the latest diff,
+      # so point-in-time recovery reaches back 0–7 days locally. A second local
+      # full adds nothing repo2 does not already hold. One diff, not more,
+      # because the volume below is sized for it.
       global:
-        repo1-retention-full: "2"
+        repo1-retention-full: "1"
         repo1-retention-full-type: count
+        repo1-retention-diff: "1"
         # ── repo2: the offsite copy ──
         # `auto` means pgBackRest authenticates via the metadata server rather
         # than a key file, so there is no service-account JSON to store, rotate
@@ -130,10 +160,12 @@ spec:
         repo2-gcs-key-type: auto
         # Retention is deliberately LONGER offsite than locally. repo1 exists to
         # make a fast restore cheap; repo2 exists for the case where the cluster
-        # or the zone is gone, and that is exactly when a two-week window is too
-        # short to be useful.
-        repo2-retention-full: "4"
+        # or the zone is gone. Two weekly fulls give point-in-time recovery
+        # from GCS reaching back 7–14 days: the oldest full is a week old just
+        # after a new one lands, and two weeks old just before.
+        repo2-retention-full: "2"
         repo2-retention-full-type: count
+        repo2-retention-diff: "3"
       repos:
         - name: repo1
           # Schedules are not optional here. pgBackRest takes an initial backup
@@ -152,13 +184,18 @@ spec:
                   # Derived, not guessed — and the peak is RETENTION PLUS ONE.
                   # pgBackRest cannot expire the oldest retained full until its
                   # replacement has completed successfully, so the moment before
-                  # expiry the repo holds three fulls, not two. Budgeting for
-                  # two is how the weekly backup fails partway through the third:
+                  # expiry the repo holds two fulls, not one, plus the retained
+                  # diff. A diff can be as large as a full when every page has
+                  # changed, so it is budgeted as one:
                   #
-                  #   (2 retained + 1 in flight) x 10Gi = 30Gi   zero compression
-                  #   + differentials and WAL                    ~10Gi headroom
+                  #   (1 retained + 1 in flight) x 10Gi = 20Gi   zero compression
+                  #   + 1 retained diff at full size      = 10Gi
+                  #   + WAL                                ~10Gi headroom
                   #   -------------------------------------------------------
                   #                                               40Gi
+                  #
+                  # This is also why repo1 keeps one diff: each extra one is
+                  # another 10Gi at worst.
                   #
                   # Deliberately sized for INCOMPRESSIBLE data. pgBackRest
                   # compresses, and real Postgres content compresses well, but a
