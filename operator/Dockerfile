@@ -16,6 +16,23 @@
 FROM --platform=$BUILDPLATFORM golang:1.27 AS builder
 WORKDIR /workspace
 
+# Assert the floor instead of trusting the tag. `golang:1.27` is mutable, CI
+# exports a type=gha,mode=max BuildKit cache, and the denylist arrived in a
+# PATCH release — so "the tag says 1.27" does not establish 1.27.3. A build that
+# resolves an older 1.27.x fails here rather than shipping a manager binary with
+# no eMudhra denylist and nothing but the distroless root store behind it.
+#
+# The workflows also pass pull: true so the base is re-resolved every run; this
+# check is what catches it if that ever regresses.
+RUN set -eux; \
+    min=go1.27.3; \
+    have="$(go env GOVERSION)"; \
+    echo "go toolchain: ${have} (floor ${min})"; \
+    if [ "$(printf '%s\n%s\n' "$min" "$have" | sort -V | head -n1)" != "$min" ]; then \
+        echo "FATAL: ${have} is below the ${min} security floor (CVE-2026-111943)" >&2; \
+        exit 1; \
+    fi
+
 # Dependencies first, so a source-only change reuses the module layer.
 COPY go.mod go.sum ./
 RUN go mod download
