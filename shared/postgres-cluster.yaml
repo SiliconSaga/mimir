@@ -155,10 +155,19 @@ spec:
         #
         # Past this threshold pgBackRest tells Postgres the segment was archived,
         # drops it, and warns in the Postgres log. That LOSES POINT-IN-TIME
-        # RECOVERY CONTINUITY — the archive gains a hole and a restore through it
-        # will fail — which is why it is paired with alerting rather than left to
-        # be discovered. It is deliberately a cliff and not a slope: a gap you
-        # are told about beats a cluster that stopped.
+        # RECOVERY CONTINUITY — the archive gains a hole, a restore through it
+        # will fail, and getting the guarantee back needs a fresh full backup.
+        #
+        # ⚠ NOTHING ALERTS ON THAT YET. The Postgres log warning notifies nobody,
+        # so this is a cliff chosen knowingly rather than a monitored one. It is
+        # still the right trade — an unnoticed archive gap is strictly less
+        # damage than an unnoticed outage that takes every tenant on this cluster
+        # down — but do not read it as a safety net that reports itself.
+        #
+        # The detection belongs in heimdall and is the next change. Note why it
+        # is not a one-liner there: on local-path, kubelet reports the NODE
+        # filesystem as a volume's capacity, so the PVC-fill rules that should
+        # have caught the original 96.5GB measured ~18% full and never fired.
         #
         # 2GiB against a 10Gi data volume: a fifth of the volume, so there is
         # room for the database itself and for the gap to be noticed, and small
