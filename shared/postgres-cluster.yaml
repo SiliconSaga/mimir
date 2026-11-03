@@ -166,11 +166,18 @@ spec:
         # (local-path reports the NODE filesystem as the volume's capacity, so
         # nothing below the node level can see this volume fill).
         archive-push-queue-max: 2GiB
-        # The queue is only measured at the START of each asynchronous run, so a
-        # large batch can overshoot the limit by the size of the batch before it
-        # is rechecked. The default batch would let the queue run far past 2GiB;
-        # this bounds the overshoot to roughly a batch's worth.
-        archive-push-batch-size: 64
+        # ⚠ A BACKSTOP, NOT AN EXACT CEILING, and deliberately left loose.
+        # The queue is only measured at the START of each asynchronous run, so
+        # it can grow past 2GiB by whatever arrives before the next recheck.
+        # pgBackRest's own lever for tightening that, `archive-push-batch-size`,
+        # DOES NOT EXIST BEFORE 2.59.0 — and the image pinned above is 2.55.0,
+        # where an unrecognised option makes pgBackRest reject its entire
+        # configuration and archive nothing. Setting it here would have broken
+        # archiving outright, which is the failure this whole file exists to
+        # prevent. If that image is ever bumped, note the option takes a SIZE
+        # (minimum 1MiB, rounded down to whole WAL segments), never a segment
+        # count. At this cluster's observed ~125MB/hour the overshoot between
+        # rechecks is small, so the loose bound still does its job.
       repos:
         - name: repo1
           # Schedules are not optional here. pgBackRest takes an initial backup
