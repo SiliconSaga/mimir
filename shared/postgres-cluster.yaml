@@ -178,6 +178,14 @@ spec:
         # ⚠ A BACKSTOP, NOT AN EXACT CEILING, and deliberately left loose.
         # The queue is only measured at the START of each asynchronous run, so
         # it can grow past 2GiB by whatever arrives before the next recheck.
+        #
+        # The runway that leaves, in numbers rather than adjectives: 2GiB of
+        # queue against this 10Gi volume keeps ~8GiB spare, and the cluster
+        # writes ~125MB/hour, so even a recheck missed entirely leaves on the
+        # order of 60 hours before the volume is the binding constraint —
+        # against asynchronous runs that recur in minutes. The incident this
+        # setting exists to prevent had NO queue bound at all, which is how it
+        # reached 96.5GB rather than overshooting 2GiB by a margin.
         # pgBackRest's own lever for tightening that, `archive-push-batch-size`,
         # DOES NOT EXIST BEFORE 2.59.0 — and the image pinned above is 2.55.0,
         # where an unrecognised option makes pgBackRest reject its entire
