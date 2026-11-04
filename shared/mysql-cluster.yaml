@@ -76,7 +76,13 @@ spec:
             # a migration.
             storage: 10Gi
     # No storageClassName, per the repo-wide rule: the cluster default is
-    # local-path on k3d, standard-rwo on GKE, Longhorn on homelab.
+    # local-path on k3d AND on homelab, standard-rwo on GKE. Homelab ran
+    # Longhorn until it was retired 2026-08-26, having never successfully
+    # provisioned a volume; nothing has replaced it yet. That is not a footnote
+    # about history. local-path enforces no size and reports the NODE
+    # filesystem as a volume's capacity, so the 10Gi above is a request nothing
+    # honours, every PVC-fill alert divides by the wrong number, and a runaway
+    # volume is bounded by the node disk alone.
 
   haproxy:
     # The consumer endpoint. MIMIR_MYSQL_HOST points here while
@@ -104,6 +110,37 @@ spec:
       timeoutSeconds: 5
       successThreshold: 1
       failureThreshold: 3
+    # Sourced by the HAProxy entrypoint before haproxy starts, so the limit is
+    # inherited by every external-check child. Without it, on containerd nodes
+    # that hand containers an effectively unlimited nofile (kind on Docker
+    # Desktop gives 1073741816), each forked check spends its whole 10s budget
+    # closing descriptors up to that limit and never reaches the check script.
+    # Every backend goes DOWN, liveness fails, and the pod restart-loops while
+    # PXC itself is healthy — 4795 restarts on homelab before this was found.
+    # Running the check by hand passes, because kubectl exec does not fork from
+    # haproxy: read the child processes (`ps`, all state R as `haproxy`), not the
+    # check script. 65536 is far above maxconn 2048, so capping there costs
+    # haproxy nothing.
+    #
+    # ⚠ THE CAP ONLY EVER LOWERS, AND THAT IS NOT STYLE. The entrypoint sources
+    # this hook under `set -e` (v1.19.0 build/haproxy-entrypoint.sh, `test -e
+    # /opt/percona/hookscript/hook.sh && source ...`), and `source` is the last
+    # command of that AND-OR list, so errexit applies to it: a ulimit that fails
+    # in here does not degrade to the old slow-check behaviour, it aborts the
+    # entrypoint and haproxy never starts at all. A bare `ulimit -n 65536` is
+    # exactly that risk wherever the inherited HARD limit is below 65536 — an
+    # earlier version of this comment called that case "harmless", which was
+    # wrong. Hence the guard rather than a realm-by-realm survey of hard limits:
+    # lowering a soft limit is always permitted, and a soft limit above 65536
+    # implies a hard limit above 65536, so the branch that runs cannot fail and
+    # the setting stays realm-neutral without depending on any realm's numbers.
+    # Where the soft limit is already at or under 65536 there is nothing to fix,
+    # and raising it to meet the hard limit would only re-create the problem.
+    hookScript: |
+      nofile_soft="$(ulimit -n)"
+      if [ "$nofile_soft" = unlimited ] || [ "$nofile_soft" -gt 65536 ]; then
+        ulimit -n 65536
+      fi
 
   backup:
     # ⚠ The backup image does NOT live in the operator's repo, and assuming it
@@ -144,46 +181,29 @@ spec:
     # earlier was a misreading. 8.0.35 is PXB's frozen base-MySQL version, not a
     # lag behind the server, and Percona publishes no other 8.0-series build.
     image: percona/percona-xtrabackup:8.0.35-34.1
-    storages:
-      # ── gcs: object storage, and the ONLY storage defined here ──
-      # `filesystem` was removed rather than kept alongside this, which is a
-      # departure from the Postgres cluster's repo1-local + repo2-offsite shape
-      # next door. The reason is mechanical, not stylistic: pgBackRest reuses ONE
-      # volume and rotates retention inside it, so a local repo costs a fixed
-      # 40Gi. PXC's `filesystem` provisions a NEW PVC PER RUN and `keep:` prunes
-      # only successful backups, so a local tier here is a disk leak with a
-      # retention setting painted on it. That is not a hypothetical — it reached
-      # 320Gi of orphans and took the regional SSD quota to 976 of 1000. There is
-      # no safe way to keep a local tier on this operator, so there isn't one.
-      #
-      # ⚠ THIS IS GCS, REACHED OVER ITS S3-COMPATIBLE ENDPOINT, and that is not a
-      # workaround anyone should undo. The PXC operator supports exactly three
-      # storage types — filesystem, s3, azure. It has NO native GCS, unlike the
-      # Percona Postgres operator's `gcs:` repo with `gcs-key-type: auto` that
-      # postgres-cluster.yaml uses. So this is the one backup path on the
-      # platform that CANNOT use keyless Workload Identity: the S3 interop API
-      # authenticates with HMAC keys, which WI cannot issue. Replacing the
-      # credentialsSecret with a GSA annotation will 403 in xbcloud.
-      gcs:
-        type: s3
-        # Explicit rather than relying on the default, because a silent `false`
-        # here would put HMAC credentials on the wire unverified.
-        verifyTLS: true
-        s3:
-          bucket: teralivekubernetes-mysql-backups
-          # The S3-compatible front door for GCS. Without this, xbcloud talks to
-          # real AWS and fails in a way that reads like a credentials problem.
-          endpointUrl: https://storage.googleapis.com
-          # Matches the bucket's location. GCS ignores the S3 region for routing,
-          # but xbcloud signs the request with it, so a mismatch is a signature
-          # error rather than a helpful message.
-          region: us-east1
-          # HMAC key, materialized by ESO from OpenBao — see
-          # mysql-backup-externalsecret.yaml for why it is static, how narrowly
-          # the GSA is scoped, and the .env recovery copy. The operator requires
-          # the keys to be named AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
-          # regardless of which object store is behind them.
-          credentialsSecret: mimir-mysql-backup-s3
+    # ── NO STORAGE IS DEFINED HERE, AND SO NO SCHEDULE EITHER ──
+    # Both are added per realm, from shared/overlays/<realm>, because the object
+    # store genuinely cannot be one fixed value: the GKE bucket and its
+    # S3-interop endpoint do not resolve on homelab, and Garage is an in-cluster
+    # Service that does not resolve on GKE. The note further down this file
+    # called for exactly this — "parameterised per environment first, the way
+    # nordri patches velero-gke vs velero-homelab" — and this is that change.
+    #
+    # ⚠ NEVER ADD A `filesystem` STORAGE TO GET A LOCAL TIER. That rule is
+    # realm-neutral, which is why it stays here rather than moving to an overlay.
+    # pgBackRest next door reuses ONE volume and rotates retention inside it, so
+    # its local repo costs a fixed 40Gi. PXC's `filesystem` provisions a NEW PVC
+    # PER RUN and `keep:` prunes only successful backups, so a local tier here is
+    # a disk leak with a retention setting painted on it — it reached 320Gi of
+    # orphans and took the regional SSD quota to 976 of 1000. There is no safe
+    # way to keep a local tier on this operator, so there isn't one.
+    #
+    # A realm with no overlay storage therefore takes NO engine-level backups.
+    # That is the honest default: a cluster that cannot reach a bucket should say
+    # so, not point at one it cannot write to. On homelab that leaves NOTHING:
+    # nordri defines Velero schedules only for GKE, and homelab's
+    # BackupStorageLocation is Unavailable, so there is no volume snapshot
+    # underneath either.
 
   # ── SCHEDULE RE-ENABLED 2026-09-16, after being off since 2026-09-14 ──
   #
@@ -255,29 +275,34 @@ spec:
   #          kubectl -n mimir get pvc            # xb-<backup-name>-<stamp>
   #          kubectl -n mimir delete pvc <name>  # returns once the pods are gone
   #
-  #      ⚠ HOMELAB IS NOT COVERED BY THIS. The bucket and endpoint above are
-  #      GKE-specific. Garage is the homelab object store, and it is an
-  #      in-cluster Service that does not resolve on GKE — so this cannot be one
-  #      fixed value for both. Today this manifest is GKE-shaped; running the
-  #      shared MySQL cluster on homelab needs the storage parameterised per
-  #      environment first, the way nordri patches velero-gke vs velero-homelab.
-  #      Left as a known limitation rather than a broken abstraction.
+  #      ✓ RESOLVED 2026-11-03 — the limitation recorded here (that this
+  #      manifest was GKE-shaped, and homelab needed the storage parameterised
+  #      per environment "the way nordri patches velero-gke vs velero-homelab")
+  #      is what this file's restructuring finally does. The storage and the
+  #      schedule it names both live in shared/overlays/gke now, so a homelab
+  #      realm no longer inherits a bucket it cannot reach.
   #
-    schedule:
-      - name: daily
-        schedule: "0 2 * * *"
-        keep: 7
-        storageName: gcs
+  #      It was worth doing: the identical mistake next door in
+  #      postgres-cluster.yaml was NOT merely dormant. pgBackRest kept retrying
+  #      an unreachable GCS repo for 33 days, and because Postgres may not
+  #      recycle WAL until every repo accepts it, 96.5GB of pg_wal accumulated
+  #      behind an 85MB database and came within about a day of filling the
+  #      host. A known limitation in a comment is still a live one in a cluster.
 
-  # NOTE: `gcs` is object storage OUTSIDE this cluster, so an engine-level backup
-  # now survives losing the cluster — the exposure the Postgres cluster records,
+  # NOTE — GKE ONLY. Everything in this note describes the storage and snapshot
+  # that shared/overlays/gke adds; a homelab realm has neither, takes no
+  # engine-level backup at all (see above), and has nothing restorable if the
+  # cluster is lost.
+  #
+  # `gcs` is object storage OUTSIDE this cluster, so on GKE an engine-level backup
+  # survives losing the cluster — the exposure the Postgres cluster records,
   # and which consolidating every tenant onto one MySQL had concentrated from one
   # app onto all of them. Bucket is separate from Velero's and pgBackRest's on
   # purpose: different retention, different lifecycle, and a mistake in one
   # cannot reach the others.
   #
-  # Velero's nightly volume snapshot remains a second, independent layer. It IS
-  # working — verified 2026-09-14 in
+  # Velero's nightly volume snapshot remains a second, independent layer on GKE.
+  # It IS working there — verified 2026-09-14 in
   # velero-daily-full-20260914060008's volumeinfo: datadir-mimir-mysql-pxc-0,
   # method NativeSnapshot, result succeeded. (An older claim that Velero is not
   # operational survives in docs/plans/data-resiliency-plan.md; that document

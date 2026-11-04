@@ -1,0 +1,160 @@
+# The GKE realm's shared data clusters.
+#
+# The manifests one directory up are realm-neutral: one local pgBackRest repo,
+# no MySQL object storage, no cloud identity. Everything that depends on being
+# on GKE is added here, so a realm that is not on GKE cannot inherit it.
+#
+# Overlays sit beside the resources they patch rather than under a base/ dir,
+# matching nordri/platform/fundamentals — the overlay lists what it wants and
+# reaches up with ../../, and bootstrap/hydration rewrites the Application's
+# path to overlays/<realm>. Reaching up is why a local build needs
+# `kustomize build --load-restrictor LoadRestrictionsNone` (ArgoCD passes it);
+# without it the build fails with "security; file ... is not in or below".
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../postgres-cluster.yaml
+  - ../../mysql-cluster.yaml
+  # GKE-ONLY, and that is why it moved out of the neutral set: it materializes
+  # an HMAC key for the GCS S3-interop endpoint from OpenBao. A realm with no
+  # MySQL object storage has nothing to authenticate to, and an ExternalSecret
+  # pointing at a key that realm's OpenBao does not hold just fails forever.
+  - ../../mysql-backup-externalsecret.yaml
+
+patches:
+  # ── Postgres: Workload Identity, and the offsite repo it unlocks ──────────
+  - target:
+      group: pgv2.percona.com
+      version: v2
+      kind: PerconaPGCluster
+      name: mimir-postgres
+    patch: |-
+      # Propagated by the operator onto the objects it manages, including the
+      # `mimir-postgres-pgbackrest` ServiceAccount — which is the only way to
+      # annotate it, since the operator owns and would revert a direct edit.
+      #
+      # This is what makes `repo2-gcs-key-type: auto` work: pgBackRest asks the
+      # metadata server for a token as this GSA, so no service-account JSON is
+      # stored in the cluster. It is also precisely why repo2 must not reach a
+      # non-GKE realm — off GKE there is no metadata server, the DNS lookup for
+      # metadata.google.internal fails, and the WAL it cannot push is retained
+      # by Postgres rather than discarded.
+      #
+      # TWO of the KSAs it lands on genuinely need it, which is not obvious and
+      # cost a debugging round to find:
+      #
+      #   mimir-postgres-pgbackrest  the repo host — runs the backups themselves
+      #   mimir-postgres-instance    the Postgres pod — runs archive-push (every
+      #                              WAL segment goes to repo2 from here) and is
+      #                              where the operator execs stanza-create
+      #
+      # Binding only the first is a trap: `pgbackrest stanza-create` run by hand
+      # on the repo host succeeds, `pgbackrest info` reports repo2 healthy, and
+      # every scheduled backup still fails — because WAL never reaches GCS. Both
+      # KSAs need roles/iam.workloadIdentityUser on the GSA. See
+      # docs/offsite-backups.md.
+      - op: add
+        path: /spec/metadata
+        value:
+          annotations:
+            iam.gke.io/gcp-service-account: pgbackrest@teralivekubernetes.iam.gserviceaccount.com
+      # `auto` means pgBackRest authenticates via the metadata server rather than
+      # a key file, so there is no service-account JSON to store, rotate or leak.
+      # Same keyless Workload Identity pattern Velero uses on this cluster.
+      - op: add
+        path: /spec/backups/pgbackrest/global/repo2-gcs-key-type
+        value: auto
+      # Retention is deliberately LONGER offsite than locally. repo1 exists to
+      # make a fast restore cheap; repo2 exists for the case where the cluster or
+      # the zone is gone. Two weekly fulls give point-in-time recovery from GCS
+      # reaching back 7–14 days: the oldest full is a week old just after a new
+      # one lands, and two weeks old just before.
+      - op: add
+        path: /spec/backups/pgbackrest/global/repo2-retention-full
+        value: "2"
+      - op: add
+        path: /spec/backups/pgbackrest/global/repo2-retention-full-type
+        value: count
+      - op: add
+        path: /spec/backups/pgbackrest/global/repo2-retention-diff
+        value: "3"
+      # APPENDED with `/-` rather than replacing the list, so repo1's definition
+      # and its 40Gi volume sizing are never restated here. Two copies of that
+      # arithmetic would drift, and the neutral file is where it is reasoned out.
+      #
+      # Deliberately NOT the Valheim shape (a scheduled job that copies files to
+      # a bucket). pgBackRest writes this repo itself, on its own schedule, and
+      # verifies what it wrote. A separate shipping job is a second scheduler
+      # that cannot see the first — which is precisely how the Valheim
+      # off-cluster uploads silently did nothing for months.
+      #
+      # Bucket is separate from the Velero bucket on purpose: different
+      # retention, different lifecycle, and a mistake in one cannot reach the
+      # other. Created out-of-band; see docs.
+      - op: add
+        path: /spec/backups/pgbackrest/repos/-
+        value:
+          name: repo2
+          gcs:
+            bucket: teralivekubernetes-pgbackrest
+          # Offset from repo1 by two hours. Both repos backing up the same
+          # database at the same instant means two pgBackRest processes competing
+          # for the same WAL and the same disk, on a cluster already tight on CPU
+          # requests.
+          schedules:
+            full: "0 3 * * 0"
+            differential: "0 3 * * 1-6"
+
+  # ── MySQL: the object storage, and the schedule that names it ─────────────
+  - target:
+      group: pxc.percona.com
+      version: v1
+      kind: PerconaXtraDBCluster
+      name: mimir-mysql
+    patch: |-
+      # ⚠ THIS IS GCS, REACHED OVER ITS S3-COMPATIBLE ENDPOINT, and that is not
+      # a workaround anyone should undo. The PXC operator supports exactly three
+      # storage types — filesystem, s3, azure. It has NO native GCS, unlike the
+      # Percona Postgres operator's `gcs:` repo with `gcs-key-type: auto` that
+      # postgres-cluster.yaml uses. So this is the one backup path on the
+      # platform that CANNOT use keyless Workload Identity: the S3 interop API
+      # authenticates with HMAC keys, which WI cannot issue. Replacing the
+      # credentialsSecret with a GSA annotation will 403 in xbcloud.
+      - op: add
+        path: /spec/backup/storages
+        value:
+          gcs:
+            type: s3
+            # Explicit rather than relying on the default, because a silent
+            # `false` here would put HMAC credentials on the wire unverified.
+            verifyTLS: true
+            s3:
+              bucket: teralivekubernetes-mysql-backups
+              # The S3-compatible front door for GCS. Without this, xbcloud
+              # talks to real AWS and fails in a way that reads like a
+              # credentials problem.
+              endpointUrl: https://storage.googleapis.com
+              # Matches the bucket's location. GCS ignores the S3 region for
+              # routing, but xbcloud signs the request with it, so a mismatch is
+              # a signature error rather than a helpful message.
+              region: us-east1
+              # HMAC key, materialized by ESO from OpenBao — see
+              # mysql-backup-externalsecret.yaml for why it is static, how
+              # narrowly the GSA is scoped, and the .env recovery copy. The
+              # operator requires the keys to be named AWS_ACCESS_KEY_ID /
+              # AWS_SECRET_ACCESS_KEY regardless of which object store is behind
+              # them.
+              credentialsSecret: mimir-mysql-backup-s3
+      # 02:00 sits between pgBackRest repo1 (01:00) and repo2 (03:00), ahead of
+      # the XenForo dump (03:20) and Velero (06:00), so no two backups share a
+      # slot on a cluster already tight on CPU requests. keep: 7 is a week of
+      # dailies. The schedule moves WITH the storage it names: a schedule whose
+      # storageName does not exist is a backup that fails every night.
+      - op: add
+        path: /spec/backup/schedule
+        value:
+          - name: daily
+            schedule: "0 2 * * *"
+            keep: 7
+            storageName: gcs

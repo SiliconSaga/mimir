@@ -12,8 +12,12 @@ via Crossplane Compositions + Percona operators. Deployed by Nidavellir.
 
 ## Key Gotchas
 
-- **Compositions omit `storageClassName`** — uses cluster default (local-path on k3d,
-  standard-rwo on GKE, Longhorn on homelab). Never hardcode a storage class.
+- **Compositions omit `storageClassName`** — uses cluster default (local-path on k3d
+  and on homelab, standard-rwo on GKE). Never hardcode a storage class. Longhorn was
+  retired on homelab 2026-08-26 and nothing replaced it, so **assume no size
+  enforcement there**: local-path ignores a PVC's request and reports the node
+  filesystem as its capacity, which is why PVC-fill alerts cannot see a mimir volume
+  fill (see `shared/postgres-cluster.yaml`).
 - **PG operator `runAsNonRoot`**: chart 2.8.2 hardcodes it with no Helm override.
   Fix is in `argocd/apps/percona-pg-operator/kustomization.yaml` (Kustomize helmCharts
   + JSON patch). Requires `--enable-helm` in ArgoCD kustomize.buildOptions.

@@ -1,0 +1,48 @@
+# The homelab realm's shared data clusters.
+#
+# This overlay adds NOTHING, and the emptiness is the content: it is a statement
+# that a homelab cluster takes the realm-neutral manifests exactly as written —
+# one local pgBackRest repo, no MySQL object storage, no cloud identity — and
+# that this is a reviewed position rather than an unfinished one.
+#
+# Build locally with `kustomize build --load-restrictor LoadRestrictionsNone`:
+# the ../../ resources sit above this root, ArgoCD already passes the flag, and
+# without it a plain build fails with "security; file ... is not in or below".
+#
+# ── WHAT IS DELIBERATELY MISSING ──────────────────────────────────────────────
+#
+# NO OFFSITE COPY. Postgres keeps repo1, a local PVC: it survives a pod restart
+# but not the loss of the cluster or the host. MySQL takes no engine-level
+# backup at all. Nor is there a Velero layer underneath either: nordri defines
+# Velero schedules only for GKE, and homelab's BackupStorageLocation reports
+# Unavailable. Losing the host here loses both databases outright.
+#
+# That gap is accepted because the alternative on offer was worse. Garage is the
+# homelab object store and it is an in-cluster Service, so a repo pointed at it
+# does not survive the one case an offsite repo exists for, while reading in
+# review as though it does. A genuine offsite target needs a bucket outside the
+# homelab plus credentials through ESO/OpenBao, and that is a deliberate piece
+# of work with a decision behind it — not a line added here.
+#
+# ── WHY NOT SIMPLY POINT repo2 AT GCS LIKE GKE DOES ───────────────────────────
+#
+# Because that is what this restructuring exists to undo, and it was not a
+# harmless mistake. Until 2026-11-03 the GKE-shaped manifest was applied to
+# every realm, so on homelab pgBackRest spent 33 days trying to authenticate to
+# GCS through a metadata server that does not exist off GKE. Postgres may not
+# recycle a WAL segment until EVERY configured repo accepts it, so an 85MB
+# database grew 96.5GB of pg_wal — about 3GB/day — and came within roughly a day
+# of filling the host disk and stopping the cluster.
+#
+# Nothing caught it for 33 days, which is the part worth remembering here: on
+# local-path, kubelet reports the NODE filesystem as a volume's capacity (that
+# 10Gi claim reported 1.0TB), so every PVC-fill alert measured ~18% full and
+# none fired. An unreachable repo in this realm is not a degraded backup, it is
+# an unmonitored disk leak. See the dead-man switch in postgres-cluster.yaml for
+# the setting that now bounds it.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../postgres-cluster.yaml
+  - ../../mysql-cluster.yaml
