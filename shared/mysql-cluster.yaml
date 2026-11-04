@@ -201,9 +201,8 @@ spec:
     # A realm with no overlay storage therefore takes NO engine-level backups.
     # That is the honest default: a cluster that cannot reach a bucket should say
     # so, not point at one it cannot write to. On homelab that leaves NOTHING:
-    # nordri defines Velero schedules only for GKE, and homelab's
-    # BackupStorageLocation is Unavailable, so there is no volume snapshot
-    # underneath either.
+    # nordri defines Velero schedules only for GKE, so there is no volume
+    # snapshot underneath either, whatever state homelab's storage location is in.
 
   # ── SCHEDULE RE-ENABLED 2026-09-16, after being off since 2026-09-14 ──
   #
