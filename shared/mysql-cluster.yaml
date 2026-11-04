@@ -110,6 +110,19 @@ spec:
       timeoutSeconds: 5
       successThreshold: 1
       failureThreshold: 3
+    # Sourced by the HAProxy entrypoint before haproxy starts, so the limit is
+    # inherited by every external-check child. Without it, on containerd nodes
+    # that hand containers an effectively unlimited nofile (kind on Docker
+    # Desktop gives 1073741816), each forked check spends its whole 10s budget
+    # closing descriptors up to that limit and never reaches the check script.
+    # Every backend goes DOWN, liveness fails, and the pod restart-loops while
+    # PXC itself is healthy — 4795 restarts on homelab before this was found.
+    # Running the check by hand passes, because kubectl exec does not fork from
+    # haproxy: read the child processes (`ps`, all state R as `haproxy`), not the
+    # check script. 65536 is far above maxconn 2048 and harmless where the node
+    # limit is already lower, so it stays realm-neutral.
+    hookScript: |
+      ulimit -n 65536
 
   backup:
     # ⚠ The backup image does NOT live in the operator's repo, and assuming it
