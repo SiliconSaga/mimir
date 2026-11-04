@@ -5,14 +5,17 @@
 # one local pgBackRest repo, no MySQL object storage, no cloud identity — and
 # that this is a reviewed position rather than an unfinished one.
 #
+# Build locally with `kustomize build --load-restrictor LoadRestrictionsNone`:
+# the ../../ resources sit above this root, ArgoCD already passes the flag, and
+# without it a plain build fails with "security; file ... is not in or below".
+#
 # ── WHAT IS DELIBERATELY MISSING ──────────────────────────────────────────────
 #
 # NO OFFSITE COPY. Postgres keeps repo1, a local PVC: it survives a pod restart
 # but not the loss of the cluster or the host. MySQL takes no engine-level
-# backup at all. The only layer underneath either is Velero's nightly volume
-# snapshot, which is crash-consistent — recovering from one is equivalent to
-# recovering from a power cut, and it is a disaster-recovery net rather than a
-# substitute for a real backup.
+# backup at all. Nor is there a Velero layer underneath either: nordri defines
+# Velero schedules only for GKE, and homelab's BackupStorageLocation reports
+# Unavailable. Losing the host here loses both databases outright.
 #
 # That gap is accepted because the alternative on offer was worse. Garage is the
 # homelab object store and it is an in-cluster Service, so a repo pointed at it

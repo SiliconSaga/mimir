@@ -182,9 +182,10 @@ spec:
     #
     # A realm with no overlay storage therefore takes NO engine-level backups.
     # That is the honest default: a cluster that cannot reach a bucket should say
-    # so, not point at one it cannot write to. On homelab the only layer today is
-    # Velero's volume snapshot, which is crash-consistent — a disaster-recovery
-    # net, not a substitute for xtrabackup.
+    # so, not point at one it cannot write to. On homelab that leaves NOTHING:
+    # nordri defines Velero schedules only for GKE, and homelab's
+    # BackupStorageLocation is Unavailable, so there is no volume snapshot
+    # underneath either.
 
   # ── SCHEDULE RE-ENABLED 2026-09-16, after being off since 2026-09-14 ──
   #
@@ -270,15 +271,20 @@ spec:
   #      behind an 85MB database and came within about a day of filling the
   #      host. A known limitation in a comment is still a live one in a cluster.
 
-  # NOTE: `gcs` is object storage OUTSIDE this cluster, so an engine-level backup
-  # now survives losing the cluster — the exposure the Postgres cluster records,
+  # NOTE — GKE ONLY. Everything in this note describes the storage and snapshot
+  # that shared/overlays/gke adds; a homelab realm has neither, takes no
+  # engine-level backup at all (see above), and has nothing restorable if the
+  # cluster is lost.
+  #
+  # `gcs` is object storage OUTSIDE this cluster, so on GKE an engine-level backup
+  # survives losing the cluster — the exposure the Postgres cluster records,
   # and which consolidating every tenant onto one MySQL had concentrated from one
   # app onto all of them. Bucket is separate from Velero's and pgBackRest's on
   # purpose: different retention, different lifecycle, and a mistake in one
   # cannot reach the others.
   #
-  # Velero's nightly volume snapshot remains a second, independent layer. It IS
-  # working — verified 2026-09-14 in
+  # Velero's nightly volume snapshot remains a second, independent layer on GKE.
+  # It IS working there — verified 2026-09-14 in
   # velero-daily-full-20260914060008's volumeinfo: datadir-mimir-mysql-pxc-0,
   # method NativeSnapshot, result succeeded. (An older claim that Velero is not
   # operational survives in docs/plans/data-resiliency-plan.md; that document
