@@ -162,6 +162,10 @@ jobs:
           context: operator
           platforms: linux/amd64,linux/arm64
           push: false
+          # Re-resolve golang:1.27 every run. The tag is mutable and the eMudhra
+          # crypto/x509 denylist shipped in a patch release, so a reused base can
+          # be below the 1.27.3 floor the Dockerfile asserts.
+          pull: true
           cache-from: type=gha
 
   publish:
@@ -221,5 +225,9 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # See the test job: mode=max persists the builder stage across runs, so
+          # without this the published binary could be compiled by a toolchain
+          # older than the asserted go1.27.3 floor.
+          pull: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
