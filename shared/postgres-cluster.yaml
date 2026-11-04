@@ -169,23 +169,31 @@ spec:
         # filesystem as a volume's capacity, so the PVC-fill rules that should
         # have caught the original 96.5GB measured ~18% full and never fired.
         #
-        # 2GiB against a 10Gi data volume: a fifth of the volume, so there is
-        # room for the database itself and for the gap to be noticed, and small
-        # enough to matter on a node whose storage class enforces no quota at all
-        # (local-path reports the NODE filesystem as the volume's capacity, so
-        # nothing below the node level can see this volume fill).
+        # Why 2GiB: it is a fifth of the volume this cluster asks for, which
+        # leaves room for the database itself, and it is small in absolute terms
+        # — the figure that matters on a node whose storage class enforces no
+        # quota, where this queue competes with every other volume for one disk
+        # rather than for its own request.
         archive-push-queue-max: 2GiB
         # ⚠ A BACKSTOP, NOT AN EXACT CEILING, and deliberately left loose.
         # The queue is only measured at the START of each asynchronous run, so
         # it can grow past 2GiB by whatever arrives before the next recheck.
         #
-        # The runway that leaves, in numbers rather than adjectives: 2GiB of
-        # queue against this 10Gi volume keeps ~8GiB spare, and the cluster
-        # writes ~125MB/hour, so even a recheck missed entirely leaves on the
-        # order of 60 hours before the volume is the binding constraint —
-        # against asynchronous runs that recur in minutes. The incident this
-        # setting exists to prevent had NO queue bound at all, which is how it
-        # reached 96.5GB rather than overshooting 2GiB by a margin.
+        # What IS bounded is the overshoot, not the runway. At this cluster's
+        # observed ~125MB/hour, the WAL that arrives between one recheck and the
+        # next is small against 2GiB, and asynchronous runs recur in minutes.
+        #
+        # ⚠ DO NOT COMPUTE A RUNWAY FROM THE 10Gi ABOVE. An earlier version of
+        # this comment did — "2GiB of queue leaves ~8GiB spare, so ~60 hours" —
+        # and it contradicted the paragraph directly above it. On local-path the
+        # 10Gi is a request nothing enforces; the real denominator is free space
+        # on the NODE filesystem, shared with every other volume on that node,
+        # which this manifest cannot see and does not control. How long the
+        # queue bound actually buys is therefore unknown until the heimdall
+        # detection lands. What this setting guarantees is narrower and still
+        # worth having: Postgres stops retaining WAL for an unreachable repo at
+        # all. The incident this exists to prevent had NO queue bound, which is
+        # how it reached 96.5GB rather than overshooting 2GiB by a margin.
         # pgBackRest's own lever for tightening that, `archive-push-batch-size`,
         # DOES NOT EXIST BEFORE 2.59.0 — and the image pinned above is 2.55.0,
         # where an unrecognised option makes pgBackRest reject its entire
@@ -193,8 +201,7 @@ spec:
         # archiving outright, which is the failure this whole file exists to
         # prevent. If that image is ever bumped, note the option takes a SIZE
         # (minimum 1MiB, rounded down to whole WAL segments), never a segment
-        # count. At this cluster's observed ~125MB/hour the overshoot between
-        # rechecks is small, so the loose bound still does its job.
+        # count.
       repos:
         - name: repo1
           # Schedules are not optional here. pgBackRest takes an initial backup

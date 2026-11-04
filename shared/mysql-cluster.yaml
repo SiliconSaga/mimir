@@ -76,7 +76,13 @@ spec:
             # a migration.
             storage: 10Gi
     # No storageClassName, per the repo-wide rule: the cluster default is
-    # local-path on k3d, standard-rwo on GKE, Longhorn on homelab.
+    # local-path on k3d AND on homelab, standard-rwo on GKE. Homelab ran
+    # Longhorn until it was retired 2026-08-26, having never successfully
+    # provisioned a volume; nothing has replaced it yet. That is not a footnote
+    # about history. local-path enforces no size and reports the NODE
+    # filesystem as a volume's capacity, so the 10Gi above is a request nothing
+    # honours, every PVC-fill alert divides by the wrong number, and a runaway
+    # volume is bounded by the node disk alone.
 
   haproxy:
     # The consumer endpoint. MIMIR_MYSQL_HOST points here while
