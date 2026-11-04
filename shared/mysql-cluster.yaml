@@ -119,10 +119,28 @@ spec:
     # PXC itself is healthy — 4795 restarts on homelab before this was found.
     # Running the check by hand passes, because kubectl exec does not fork from
     # haproxy: read the child processes (`ps`, all state R as `haproxy`), not the
-    # check script. 65536 is far above maxconn 2048 and harmless where the node
-    # limit is already lower, so it stays realm-neutral.
+    # check script. 65536 is far above maxconn 2048, so capping there costs
+    # haproxy nothing.
+    #
+    # ⚠ THE CAP ONLY EVER LOWERS, AND THAT IS NOT STYLE. The entrypoint sources
+    # this hook under `set -e` (v1.19.0 build/haproxy-entrypoint.sh, `test -e
+    # /opt/percona/hookscript/hook.sh && source ...`), and `source` is the last
+    # command of that AND-OR list, so errexit applies to it: a ulimit that fails
+    # in here does not degrade to the old slow-check behaviour, it aborts the
+    # entrypoint and haproxy never starts at all. A bare `ulimit -n 65536` is
+    # exactly that risk wherever the inherited HARD limit is below 65536 — an
+    # earlier version of this comment called that case "harmless", which was
+    # wrong. Hence the guard rather than a realm-by-realm survey of hard limits:
+    # lowering a soft limit is always permitted, and a soft limit above 65536
+    # implies a hard limit above 65536, so the branch that runs cannot fail and
+    # the setting stays realm-neutral without depending on any realm's numbers.
+    # Where the soft limit is already at or under 65536 there is nothing to fix,
+    # and raising it to meet the hard limit would only re-create the problem.
     hookScript: |
-      ulimit -n 65536
+      nofile_soft="$(ulimit -n)"
+      if [ "$nofile_soft" = unlimited ] || [ "$nofile_soft" -gt 65536 ]; then
+        ulimit -n 65536
+      fi
 
   backup:
     # ⚠ The backup image does NOT live in the operator's repo, and assuming it
