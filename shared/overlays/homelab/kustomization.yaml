@@ -14,8 +14,9 @@
 # NO OFFSITE COPY. Postgres keeps repo1, a local PVC: it survives a pod restart
 # but not the loss of the cluster or the host. MySQL takes no engine-level
 # backup at all. Nor is there a Velero layer underneath either: nordri defines
-# Velero schedules only for GKE, and homelab's BackupStorageLocation reports
-# Unavailable. Losing the host here loses both databases outright.
+# Velero schedules only for GKE, so homelab's Velero, even with a working
+# storage location, takes no snapshots. Losing the host here loses both
+# databases outright.
 #
 # That gap is accepted because the alternative on offer was worse. Garage is the
 # homelab object store and it is an in-cluster Service, so a repo pointed at it
