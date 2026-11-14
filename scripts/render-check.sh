@@ -4,18 +4,24 @@
 # Builds both overlays, then layers the gke overlay with the same patches the
 # mimir-shared-clusters ApplicationSet injects (example-project / gke-prod
 # substituted for the identity values) and asserts the project and per-cluster
-# paths land where the patches say. No cluster, no credentials.
+# paths land where the patches say. No cluster, no credentials (uses standalone
+# kustomize, or falls back to the offline `kubectl kustomize`).
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BUILD=(kustomize build --load-restrictor LoadRestrictionsNone)
 
 fail() {
   echo "render-check FAIL: $*" >&2
   exit 1
 }
 
-command -v kustomize >/dev/null 2>&1 || fail "kustomize not on PATH"
+if command -v kustomize >/dev/null 2>&1; then
+  BUILD=(kustomize build --load-restrictor LoadRestrictionsNone)
+elif command -v kubectl >/dev/null 2>&1; then
+  BUILD=(kubectl kustomize --load-restrictor LoadRestrictionsNone)
+else
+  fail "neither kustomize nor kubectl on PATH"
+fi
 
 homelab="$("${BUILD[@]}" "$REPO/shared/overlays/homelab")" || fail "homelab overlay does not build"
 gke="$("${BUILD[@]}" "$REPO/shared/overlays/gke")" || fail "gke overlay does not build"
@@ -28,14 +34,16 @@ grep -q 'repo2-gcs-key-type: auto' <<<"$gke" || fail "gke build lacks repo2-gcs-
 # Scratch kustomization: gke overlay plus the ApplicationSet's gke patches.
 project="example-project"
 cluster="gke-prod"
-scratch="$(mktemp -d)"
+# Inside the repo so the overlay can be referenced relatively (kustomize rejects
+# absolute paths under resources:).
+scratch="$(mktemp -d "$REPO/.render-check.XXXXXX")"
 trap 'rm -rf "$scratch"' EXIT
 
 cat >"$scratch/kustomization.yaml" <<EOF
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
-  - $REPO/shared/overlays/gke
+  - ../shared/overlays/gke
 patches:
   - target: {group: pgv2.percona.com, version: v2, kind: PerconaPGCluster, name: mimir-postgres}
     patch: |-

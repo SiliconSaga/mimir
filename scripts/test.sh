@@ -53,11 +53,11 @@ case "$mode" in
     GO="$(find_go)"
     cd "$REPO/operator"
     "$GO" test ./... -count=1 ${rest[@]+"${rest[@]}"}
-    # Offline overlay render check; needs kustomize, skipped without it.
-    if command -v kustomize >/dev/null 2>&1; then
+    # Offline overlay render check; needs kustomize or kubectl, skipped without either.
+    if command -v kustomize >/dev/null 2>&1 || command -v kubectl >/dev/null 2>&1; then
       bash "$REPO/scripts/render-check.sh"
     else
-      echo "note: kustomize not on PATH, skipping scripts/render-check.sh"
+      echo "note: neither kustomize nor kubectl on PATH, skipping scripts/render-check.sh"
     fi
     ;;
   integration)
