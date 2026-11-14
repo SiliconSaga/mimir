@@ -8,8 +8,8 @@
 #
 # Overlays sit beside the resources they patch rather than under a base/ dir,
 # matching nordri/platform/fundamentals — the overlay lists what it wants and
-# reaches up with ../../, and bootstrap/hydration rewrites the Application's
-# path to overlays/<realm>. Reaching up is why a local build needs
+# reaches up with ../../, and the mimir-shared-clusters ApplicationSet picks
+# overlays/<environment> from the cluster identity. Reaching up is why a local build needs
 # `kustomize build --load-restrictor LoadRestrictionsNone` (ArgoCD passes it);
 # without it the build fails with "security; file ... is not in or below".
 apiVersion: kustomize.config.k8s.io/v1beta1

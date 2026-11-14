@@ -49,6 +49,31 @@ grant    roles/storage.objectAdmin, scoped to that bucket only
 binding  roles/iam.workloadIdentityUser on the GSA, for TWO KSAs
 ```
 
+### After a repo2-path change
+
+On gke-prod only `repo2-path` moves; the bucket stays. Whether the operator
+re-runs `stanza-create` for the new path is **not verified** — it may only do so
+when the repo spec (the bucket) changes, not when a `global` option does. Check
+rather than assume, because an absent stanza is not cosmetic: `archive-push`
+fails for repo2, Postgres retains every unpushed WAL segment in `pg_wal`, and the
+PVC slowly fills until the shared database cluster goes down.
+
+```bash
+ws k8s exec -n mimir mimir-postgres-repo-host-0 -c pgbackrest -- pgbackrest info --repo=2
+```
+
+If the stanza is absent for the new path, create it (on the repo host, or the
+instance pod, whichever has the repo2 config):
+
+```bash
+pgbackrest stanza-create --stanza=db --repo=2
+```
+
+If `info` already shows the stanza, do nothing. Either way, watch the size of
+`pg_wal` on the instance pod for a day or so, and watch for an
+`UnableToCreateStanzas` event on the PerconaPGCluster. Run this check before
+deleting anything from the old locations.
+
 ### The two-KSA trap
 
 This is the part that is easy to get wrong, and it fails in a way that looks
@@ -235,8 +260,28 @@ the "THE STATUS LIED" notes beside the schedule in `shared/mysql-cluster.yaml`.
 - **A restore drill.** Neither Postgres repo has been restored from, and neither
   has MySQL. Until that happens this is an untested backup, which is the only
   kind that fails when it matters.
-- **Old-path restore sources.** `gke-prod`'s pre-3a pgBackRest repository at the
-  default path (the bucket's `/pgbackrest`) and its MySQL backup folders at the
-  bucket root are not moved or deleted by the move to per-cluster paths. They
-  stay as named restore sources until retention lapses; new writes go only to
-  `/<cluster>/pgbackrest` and `<bucket>/<cluster>`.
+- **Old-path restore sources.** `gke-prod`'s pre-3a pgBackRest repository and its
+  MySQL backup folders at the bucket root are not moved or deleted by the move to
+  per-cluster paths; new writes go only to `/<cluster>/pgbackrest` and
+  `<bucket>/<cluster>`. The two engines age differently:
+  - **Postgres: the old repository does not expire.** pgBackRest `expire` acts
+    only on the repo path it is currently configured for, so once `repo2-path`
+    moves the old repository is never expired again. It stays until someone
+    deletes it or a GCS lifecycle rule removes it. The default cloud repo path in
+    the Crunchy-derived operator is probably `/pgbackrest/repo2`
+    (`/pgbackrest/<repoName>`), not the bare `/pgbackrest` — confirm the exact
+    string with `gcloud storage ls gs://teralivekubernetes-pgbackrest/` before
+    relying on it. To restore from it, pass the old path explicitly in a
+    `PerconaPGRestore`:
+
+    ```yaml
+    options:
+      - "--repo=2"
+      - "--repo2-path=<old path, as confirmed above>"
+      - "--type=time"
+      - "--target=<timestamp>"
+    ```
+  - **MySQL: the old backups lapse with retention.** `keep: 7` deletes old backup
+    CRs and their objects at the destinations those CRs recorded, so a restore
+    goes by the destination recorded on the backup CR. Expect the old root-level
+    folders to be usable for about 7 days after the switch.

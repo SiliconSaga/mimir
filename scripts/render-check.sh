@@ -39,29 +39,26 @@ cluster="gke-prod"
 scratch="$(mktemp -d "$REPO/.render-check.XXXXXX")"
 trap 'rm -rf "$scratch"' EXIT
 
-cat >"$scratch/kustomization.yaml" <<EOF
+# The patches come from the ApplicationSet itself, not a copy: take the
+# `patches:` block of its templatePatch (up to the closing `{{- end }}`), strip
+# the template's 10-space indent, and substitute the two template variables.
+appset="$REPO/argocd/apps/shared-clusters.yaml"
+{
+  cat <<EOF
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
   - ../shared/overlays/gke
-patches:
-  - target: {group: pgv2.percona.com, version: v2, kind: PerconaPGCluster, name: mimir-postgres}
-    patch: |-
-      - op: replace
-        path: /spec/metadata/annotations/iam.gke.io~1gcp-service-account
-        value: pgbackrest@${project}.iam.gserviceaccount.com
-      - op: replace
-        path: /spec/backups/pgbackrest/repos/1/gcs/bucket
-        value: ${project}-pgbackrest
-      - op: add
-        path: /spec/backups/pgbackrest/global/repo2-path
-        value: /${cluster}/pgbackrest
-  - target: {group: pxc.percona.com, version: v1, kind: PerconaXtraDBCluster, name: mimir-mysql}
-    patch: |-
-      - op: replace
-        path: /spec/backup/storages/gcs/s3/bucket
-        value: ${project}-mysql-backups/${cluster}
 EOF
+  awk '/^          patches:$/ {on=1} /^    \{\{- end \}\}$/ {on=0} on' "$appset" \
+    | sed -e 's/^          //' \
+          -e "s/{{ \$project }}/${project}/g" \
+          -e "s/{{ \$cluster }}/${cluster}/g"
+} >"$scratch/kustomization.yaml"
+grep -q '^patches:$' "$scratch/kustomization.yaml" || fail "could not extract patches from $appset"
+if grep -q '{{' "$scratch/kustomization.yaml"; then
+  fail "unsubstituted template variable in extracted patches"
+fi
 
 patched="$("${BUILD[@]}" "$scratch")" || fail "patched gke overlay does not build"
 
@@ -71,6 +68,11 @@ grep -q "repo2-path: /gke-prod/pgbackrest" <<<"$patched" || fail "repo2-path not
 grep -q "bucket: example-project-mysql-backups/gke-prod" <<<"$patched" || fail "PXC bucket not per-cluster"
 if grep -q teralivekubernetes <<<"$patched"; then
   fail "teralivekubernetes still present after patching"
+fi
+# The placeholder is a syntactically valid bucket name, so a leak would only
+# surface at backup time.
+if grep -q set-by-the-shared-clusters-applicationset <<<"$patched"; then
+  fail "placeholder set-by-the-shared-clusters-applicationset survived patching"
 fi
 
 echo "render-check OK"
