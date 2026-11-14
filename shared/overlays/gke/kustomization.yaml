@@ -1,3 +1,5 @@
+# The mimir-shared-clusters ApplicationSet patches three values below by JSON path; keep repo2 as the second repo and the storage named gcs.
+#
 # The GKE realm's shared data clusters.
 #
 # The manifests one directory up are realm-neutral: one local pgBackRest repo,
@@ -58,7 +60,9 @@ patches:
         path: /spec/metadata
         value:
           annotations:
-            iam.gke.io/gcp-service-account: pgbackrest@teralivekubernetes.iam.gserviceaccount.com
+            # Value set by the mimir-shared-clusters ApplicationSet from the
+            # identity's gcp-project (argocd/apps/shared-clusters.yaml).
+            iam.gke.io/gcp-service-account: set-by-the-shared-clusters-applicationset
       # `auto` means pgBackRest authenticates via the metadata server rather than
       # a key file, so there is no service-account JSON to store, rotate or leak.
       # Same keyless Workload Identity pattern Velero uses on this cluster.
@@ -97,7 +101,10 @@ patches:
         value:
           name: repo2
           gcs:
-            bucket: teralivekubernetes-pgbackrest
+            # Set by the mimir-shared-clusters ApplicationSet from the identity's
+            # gcp-project (argocd/apps/shared-clusters.yaml), which also adds
+            # global/repo2-path as /<cluster>/pgbackrest.
+            bucket: set-by-the-shared-clusters-applicationset
           # Offset from repo1 by two hours. Both repos backing up the same
           # database at the same instant means two pgBackRest processes competing
           # for the same WAL and the same disk, on a cluster already tight on CPU
@@ -130,7 +137,10 @@ patches:
             # `false` here would put HMAC credentials on the wire unverified.
             verifyTLS: true
             s3:
-              bucket: teralivekubernetes-mysql-backups
+              # Set by the mimir-shared-clusters ApplicationSet to
+              # <gcp-project>-mysql-backups/<cluster> from the identity
+              # (argocd/apps/shared-clusters.yaml).
+              bucket: set-by-the-shared-clusters-applicationset
               # The S3-compatible front door for GCS. Without this, xbcloud
               # talks to real AWS and fails in a way that reads like a
               # credentials problem.

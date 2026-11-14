@@ -34,6 +34,14 @@ The manifest is declarative, but the GCP side of repo2 is not. These resources
 are created by hand and a cluster rebuild will not recreate them. If repo2 ever
 reports `error (missing stanza path)` on a fresh cluster, start here.
 
+The project is not in Git either: the `mimir-shared-clusters` ApplicationSet
+reads it from the cluster identity (the `nordri.siliconsaga.org/gcp-project`
+annotation on the `in-cluster` Secret, i.e. the identity's `gcpProject`) and
+patches the GSA, the repo2 bucket and the MySQL bucket. Names below use
+`teralivekubernetes` as the current project. Paths are per cluster:
+`/<cluster>/pgbackrest` inside the Postgres bucket (`repo2-path`) and
+`<bucket>/<cluster>` for MySQL.
+
 ```
 bucket   gs://teralivekubernetes-pgbackrest      us-east1, uniform access
 GSA      pgbackrest@teralivekubernetes.iam.gserviceaccount.com
@@ -227,3 +235,8 @@ the "THE STATUS LIED" notes beside the schedule in `shared/mysql-cluster.yaml`.
 - **A restore drill.** Neither Postgres repo has been restored from, and neither
   has MySQL. Until that happens this is an untested backup, which is the only
   kind that fails when it matters.
+- **Old-path restore sources.** `gke-prod`'s pre-3a pgBackRest repository at the
+  default path (the bucket's `/pgbackrest`) and its MySQL backup folders at the
+  bucket root are not moved or deleted by the move to per-cluster paths. They
+  stay as named restore sources until retention lapses; new writes go only to
+  `/<cluster>/pgbackrest` and `<bucket>/<cluster>`.
