@@ -271,12 +271,14 @@ the "THE STATUS LIED" notes beside the schedule in `shared/mysql-cluster.yaml`.
     the Crunchy-derived operator is probably `/pgbackrest/repo2`
     (`/pgbackrest/<repoName>`), not the bare `/pgbackrest` — confirm the exact
     string with `gcloud storage ls gs://teralivekubernetes-pgbackrest/` before
-    relying on it. To restore from it, pass the old path explicitly in a
-    `PerconaPGRestore`:
+    relying on it. To restore from it, select the repository with `repoName` and
+    pass the old path explicitly in a `PerconaPGRestore` (the operator refuses a
+    `--repo=` entry in `options` and never builds the restore Job; `repoName` is
+    the only accepted selector):
 
     ```yaml
+    repoName: repo2
     options:
-      - "--repo=2"
       - "--repo2-path=<old path, as confirmed above>"
       - "--type=time"
       - "--target=<timestamp>"
@@ -285,3 +287,11 @@ the "THE STATUS LIED" notes beside the schedule in `shared/mysql-cluster.yaml`.
     CRs and their objects at the destinations those CRs recorded, so a restore
     goes by the destination recorded on the backup CR. Expect the old root-level
     folders to be usable for about 7 days after the switch.
+  - **MySQL: change the storage path only between backups.** The operator keeps
+    a running backup Job as it is while recomputing the destination from the
+    current storage spec on every reconcile, so a path change landing mid-run
+    records a destination the Job never wrote to. Before the sync that changes
+    `bucket` (the migration to per-cluster paths), confirm
+    `kubectl get perconaxtradbclusterbackup -n mimir` shows nothing in a
+    non-terminal state (`Starting`, `Running`); the daily runs at 02:00 UTC, so
+    any other hour is clear.
