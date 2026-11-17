@@ -294,4 +294,7 @@ the "THE STATUS LIED" notes beside the schedule in `shared/mysql-cluster.yaml`.
     `bucket` (the migration to per-cluster paths), confirm
     `kubectl get perconaxtradbclusterbackup -n mimir` shows nothing in a
     non-terminal state (`Starting`, `Running`); the daily runs at 02:00 UTC, so
-    any other hour is clear.
+    any other hour is clear. Start no on-demand `PerconaXtraDBClusterBackup`
+    either until the sync has applied, that is until
+    `kubectl get perconaxtradbcluster -n mimir mimir-mysql -o jsonpath='{.spec.backup.storages.gcs.s3.bucket}'`
+    shows the new path: the gate is the applied spec, not the clock.
