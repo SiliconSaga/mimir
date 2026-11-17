@@ -52,7 +52,13 @@ case "$mode" in
   unit)
     GO="$(find_go)"
     cd "$REPO/operator"
-    exec "$GO" test ./... -count=1 ${rest[@]+"${rest[@]}"}
+    "$GO" test ./... -count=1 ${rest[@]+"${rest[@]}"}
+    # Offline overlay render check; needs kustomize or kubectl, skipped without either.
+    if command -v kustomize >/dev/null 2>&1 || command -v kubectl >/dev/null 2>&1; then
+      bash "$REPO/scripts/render-check.sh"
+    else
+      echo "note: neither kustomize nor kubectl on PATH, skipping scripts/render-check.sh"
+    fi
     ;;
   integration)
     # The provisioner tests need a real server: identifier quoting can be

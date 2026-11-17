@@ -34,12 +34,45 @@ The manifest is declarative, but the GCP side of repo2 is not. These resources
 are created by hand and a cluster rebuild will not recreate them. If repo2 ever
 reports `error (missing stanza path)` on a fresh cluster, start here.
 
+The project is not in Git either: the `mimir-shared-clusters` ApplicationSet
+reads it from the cluster identity (the `nordri.siliconsaga.org/gcp-project`
+annotation on the `in-cluster` Secret, i.e. the identity's `gcpProject`) and
+patches the GSA, the repo2 bucket and the MySQL bucket. Names below use
+`teralivekubernetes` as the current project. Paths are per cluster:
+`/<cluster>/pgbackrest` inside the Postgres bucket (`repo2-path`) and
+`<bucket>/<cluster>` for MySQL.
+
 ```
 bucket   gs://teralivekubernetes-pgbackrest      us-east1, uniform access
 GSA      pgbackrest@teralivekubernetes.iam.gserviceaccount.com
 grant    roles/storage.objectAdmin, scoped to that bucket only
 binding  roles/iam.workloadIdentityUser on the GSA, for TWO KSAs
 ```
+
+### After a repo2-path change
+
+On gke-prod only `repo2-path` moves; the bucket stays. Whether the operator
+re-runs `stanza-create` for the new path is **not verified** — it may only do so
+when the repo spec (the bucket) changes, not when a `global` option does. Check
+rather than assume, because an absent stanza is not cosmetic: `archive-push`
+fails for repo2, Postgres retains every unpushed WAL segment in `pg_wal`, and the
+PVC slowly fills until the shared database cluster goes down.
+
+```bash
+ws k8s exec -n mimir mimir-postgres-repo-host-0 -c pgbackrest -- pgbackrest info --repo=2
+```
+
+If the stanza is absent for the new path, create it (on the repo host, or the
+instance pod, whichever has the repo2 config):
+
+```bash
+pgbackrest stanza-create --stanza=db --repo=2
+```
+
+If `info` already shows the stanza, do nothing. Either way, watch the size of
+`pg_wal` on the instance pod for a day or so, and watch for an
+`UnableToCreateStanzas` event on the PerconaPGCluster. Run this check before
+deleting anything from the old locations.
 
 ### The two-KSA trap
 
@@ -227,3 +260,41 @@ the "THE STATUS LIED" notes beside the schedule in `shared/mysql-cluster.yaml`.
 - **A restore drill.** Neither Postgres repo has been restored from, and neither
   has MySQL. Until that happens this is an untested backup, which is the only
   kind that fails when it matters.
+- **Old-path restore sources.** `gke-prod`'s pre-3a pgBackRest repository and its
+  MySQL backup folders at the bucket root are not moved or deleted by the move to
+  per-cluster paths; new writes go only to `/<cluster>/pgbackrest` and
+  `<bucket>/<cluster>`. The two engines age differently:
+  - **Postgres: the old repository does not expire.** pgBackRest `expire` acts
+    only on the repo path it is currently configured for, so once `repo2-path`
+    moves the old repository is never expired again. It stays until someone
+    deletes it or a GCS lifecycle rule removes it. The default cloud repo path in
+    the Crunchy-derived operator is probably `/pgbackrest/repo2`
+    (`/pgbackrest/<repoName>`), not the bare `/pgbackrest` — confirm the exact
+    string with `gcloud storage ls gs://teralivekubernetes-pgbackrest/` before
+    relying on it. To restore from it, select the repository with `repoName` and
+    pass the old path explicitly in a `PerconaPGRestore` (the operator refuses a
+    `--repo=` entry in `options` and never builds the restore Job; `repoName` is
+    the only accepted selector):
+
+    ```yaml
+    repoName: repo2
+    options:
+      - "--repo2-path=<old path, as confirmed above>"
+      - "--type=time"
+      - "--target=<timestamp>"
+    ```
+  - **MySQL: the old backups lapse with retention.** `keep: 7` deletes old backup
+    CRs and their objects at the destinations those CRs recorded, so a restore
+    goes by the destination recorded on the backup CR. Expect the old root-level
+    folders to be usable for about 7 days after the switch.
+  - **MySQL: change the storage path only between backups.** The operator keeps
+    a running backup Job as it is while recomputing the destination from the
+    current storage spec on every reconcile, so a path change landing mid-run
+    records a destination the Job never wrote to. Before the sync that changes
+    `bucket` (the migration to per-cluster paths), confirm
+    `kubectl get perconaxtradbclusterbackup -n mimir` shows nothing in a
+    non-terminal state (`Starting`, `Running`); the daily runs at 02:00 UTC, so
+    any other hour is clear. Start no on-demand `PerconaXtraDBClusterBackup`
+    either until the sync has applied, that is until
+    `kubectl get perconaxtradbcluster -n mimir mimir-mysql -o jsonpath='{.spec.backup.storages.gcs.s3.bucket}'`
+    shows the new path: the gate is the applied spec, not the clock.

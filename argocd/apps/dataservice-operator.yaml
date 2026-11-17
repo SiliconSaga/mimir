@@ -17,7 +17,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: 'http://gitea-http.gitea.svc.cluster.local:3000/nordri-admin/mimir.git'
+    repoURL: 'http://git.gitops.svc.cluster.local:3000/siliconsaga/mimir.git'
     targetRevision: HEAD
     path: operator/config
   destination:

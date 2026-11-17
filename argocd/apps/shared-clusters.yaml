@@ -1,4 +1,4 @@
-# ArgoCD Application for the platform's shared data clusters.
+# ApplicationSet for the platform's shared data clusters.
 #
 # These hold every tenant's data, which is why they are split out of the
 # operator Application and why prune is off. Under `prune: true`, deleting or
@@ -11,33 +11,80 @@
 #
 # SkipDryRunOnMissingResource: PerconaPGCluster is validated against a CRD that
 # a sibling Application installs, so on a cold bootstrap it does not exist yet.
+#
+# The cluster's identity (labels and annotations on the `in-cluster` Secret,
+# written by nordri) picks the overlay and, on gke, supplies the GCP project and
+# the per-cluster backup prefixes.
 apiVersion: argoproj.io/v1alpha1
-kind: Application
+kind: ApplicationSet
 metadata:
   name: mimir-shared-clusters
   namespace: argo
-  # Deliberately NO resources-finalizer.argocd.argoproj.io.
-  #
-  # That finalizer cascades: deleting the Application deletes the resources it
-  # manages, which here means the running database cluster. Setting prune:false
-  # to protect the data and then leaving the cascade in place protects against
-  # a deleted *file* while leaving a deleted *Application* fatal — the smaller
-  # of the two accidents. Without it, removing the Application orphans the
-  # cluster, which is recoverable.
 spec:
-  project: default
-  source:
-    repoURL: 'http://gitea-http.gitea.svc.cluster.local:3000/nordri-admin/mimir.git'
-    targetRevision: HEAD
-    path: shared
-  destination:
-    server: https://kubernetes.default.svc
-    namespace: mimir
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
   syncPolicy:
-    automated:
-      prune: false
-      selfHeal: true
-    syncOptions:
-      - CreateNamespace=true
-      - ServerSideApply=true
-      - SkipDryRunOnMissingResource=true
+    preserveResourcesOnDeletion: true
+    applicationsSync: create-update
+  generators:
+    - clusters:
+        selector:
+          matchExpressions:
+            - {key: nordri.siliconsaga.org/cluster, operator: Exists}
+  template:
+    metadata:
+      name: mimir-shared-clusters
+      namespace: argo
+      # Deliberately NO resources-finalizer.argocd.argoproj.io.
+      #
+      # That finalizer cascades: deleting the Application deletes the resources it
+      # manages, which here means the running database cluster. Setting prune:false
+      # to protect the data and then leaving the cascade in place protects against
+      # a deleted *file* while leaving a deleted *Application* fatal — the smaller
+      # of the two accidents. Without it, removing the Application orphans the
+      # cluster, which is recoverable.
+    spec:
+      project: default
+      source:
+        repoURL: 'http://git.gitops.svc.cluster.local:3000/siliconsaga/mimir.git'
+        targetRevision: HEAD
+        path: '{{ if not (index .metadata.labels "nordri.siliconsaga.org/environment") }}{{ fail "identity: environment label missing on the in-cluster Secret" }}{{ end }}shared/overlays/{{ index .metadata.labels "nordri.siliconsaga.org/environment" }}'
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: mimir
+      syncPolicy:
+        automated:
+          prune: false
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+          - ServerSideApply=true
+          - SkipDryRunOnMissingResource=true
+  templatePatch: |
+    {{- if not (index .metadata.labels "nordri.siliconsaga.org/environment") }}{{ fail "identity: environment label missing on the in-cluster Secret" }}{{ end }}
+    {{- if eq (index .metadata.labels "nordri.siliconsaga.org/environment") "gke" }}
+    {{- if not (index .metadata.annotations "nordri.siliconsaga.org/gcp-project") }}{{ fail "identity: gcp-project annotation missing on the in-cluster Secret" }}{{ end }}
+    {{- if not (index .metadata.labels "nordri.siliconsaga.org/cluster") }}{{ fail "identity: cluster label missing on the in-cluster Secret" }}{{ end }}
+    {{- $project := index .metadata.annotations "nordri.siliconsaga.org/gcp-project" }}
+    {{- $cluster := index .metadata.labels "nordri.siliconsaga.org/cluster" }}
+    spec:
+      source:
+        kustomize:
+          patches:
+            - target: {group: pgv2.percona.com, version: v2, kind: PerconaPGCluster, name: mimir-postgres}
+              patch: |-
+                - op: replace
+                  path: /spec/metadata/annotations/iam.gke.io~1gcp-service-account
+                  value: pgbackrest@{{ $project }}.iam.gserviceaccount.com
+                - op: replace
+                  path: /spec/backups/pgbackrest/repos/1/gcs/bucket
+                  value: {{ $project }}-pgbackrest
+                - op: add
+                  path: /spec/backups/pgbackrest/global/repo2-path
+                  value: /{{ $cluster }}/pgbackrest
+            - target: {group: pxc.percona.com, version: v1, kind: PerconaXtraDBCluster, name: mimir-mysql}
+              patch: |-
+                - op: replace
+                  path: /spec/backup/storages/gcs/s3/bucket
+                  value: {{ $project }}-mysql-backups/{{ $cluster }}
+    {{- end }}
